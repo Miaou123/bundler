@@ -304,12 +304,13 @@ export class PumpFunSDK {
       balanceCheckInterval: 10,
     };
 
-    // 5. Send via Jito bundle with enhanced debugging
-    console.log(`🚀 Sending Jito bundle with enhanced debugging...`);
+    // 5. Send via Jito bundle with enhanced debugging and verification
+    console.log(`🚀 Sending Jito bundle with enhanced debugging and verification...`);
     const jitoResult = await sendSmartJitoBundle(
       versionedTransactions,
       creator, // Payer
-      jitoConfig
+      jitoConfig,
+      mint.publicKey.toBase58() // Pass expected mint for verification
     );
 
     if (jitoResult.success) {

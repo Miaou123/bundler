@@ -38,6 +38,8 @@ import {
     bundleId?: string;
     error?: string;
     attempts?: number;
+    verificationDetails?: any;
+    confirmationDetails?: any;
   }
   
   export interface JitoBundleOptions {
@@ -99,13 +101,6 @@ import {
           accountKeysCount: tx.message.staticAccountKeys?.length || 0,
           recentBlockhash: tx.message.recentBlockhash ? tx.message.recentBlockhash.substring(0, 20) + '...' : 'missing'
         };
-        
-        // Check for compute budget instructions
-        const computeBudgetProgram = '11111111111111111111111111111111';
-        const hasComputeBudget = tx.message.compiledInstructions?.some(ix => 
-          tx.message.staticAccountKeys?.[ix.programIdIndex]?.toBase58() === computeBudgetProgram
-        );
-        details.hasComputeBudgetInstructions = hasComputeBudget;
       }
       
       logger.debug(`📋 Transaction ${index} analysis:`, details);
@@ -172,6 +167,185 @@ import {
   }
   
   /**
+   * FIXED: Bundle confirmation monitoring with proper verification
+   */
+  async function monitorBundleConfirmationDetailed(
+    connection: Connection,
+    tipSignature: string,
+    timeoutSeconds: number = 30
+  ): Promise<{ confirmed: boolean; details: any }> {
+    logger.info(`👀 MONITORING BUNDLE CONFIRMATION:`);
+    logger.info(`   Tip signature: ${tipSignature}`);
+    logger.info(`   Timeout: ${timeoutSeconds}s`);
+    
+    const startTime = Date.now();
+    const timeoutMs = timeoutSeconds * 1000;
+    let checkCount = 0;
+    
+    while (Date.now() - startTime < timeoutMs) {
+      try {
+        checkCount++;
+        logger.debug(`   Check ${checkCount}: Looking for tip transaction...`);
+        
+        const status = await connection.getSignatureStatus(tipSignature);
+        
+        if (status.value) {
+          logger.info(`   ✅ Tip transaction found on-chain!`);
+          logger.info(`   Status: ${status.value.confirmationStatus}`);
+          logger.info(`   Slot: ${status.value.slot}`);
+          
+          if (status.value.err) {
+            logger.error(`   ❌ Tip transaction failed:`, status.value.err);
+            return { 
+              confirmed: false, 
+              details: { 
+                error: status.value.err, 
+                slot: status.value.slot,
+                checkCount 
+              } 
+            };
+          }
+          
+          if (status.value.confirmationStatus === 'confirmed' || status.value.confirmationStatus === 'finalized') {
+            logger.info(`   🎉 Bundle confirmed! Tip transaction successful`);
+            
+            // Additional verification: try to get full transaction details
+            try {
+              const txDetails = await connection.getTransaction(tipSignature, {
+                maxSupportedTransactionVersion: 0,
+                commitment: 'confirmed'
+              });
+              
+              if (txDetails) {
+                logger.info(`   📋 Transaction details retrieved:`);
+                logger.info(`     Block time: ${txDetails.blockTime ? new Date(txDetails.blockTime * 1000).toISOString() : 'unknown'}`);
+                logger.info(`     Fee: ${txDetails.meta?.fee || 'unknown'} lamports`);
+                logger.info(`     Success: ${!txDetails.meta?.err}`);
+                
+                return { 
+                  confirmed: true, 
+                  details: { 
+                    slot: status.value.slot,
+                    blockTime: txDetails.blockTime,
+                    fee: txDetails.meta?.fee,
+                    success: !txDetails.meta?.err,
+                    checkCount 
+                  } 
+                };
+              }
+            } catch (detailsError) {
+              logger.warn(`   ⚠️  Could not get transaction details: ${detailsError}`);
+            }
+            
+            return { 
+              confirmed: true, 
+              details: { 
+                slot: status.value.slot,
+                confirmationStatus: status.value.confirmationStatus,
+                checkCount 
+              } 
+            };
+          }
+          
+          logger.debug(`   ⏳ Status: ${status.value.confirmationStatus}, waiting...`);
+        } else {
+          logger.debug(`   ⏳ Transaction not found yet...`);
+        }
+        
+        // Wait 2 seconds before next check
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+      } catch (error) {
+        logger.debug(`   ⚠️  Error checking bundle status: ${error}`);
+        // Continue checking despite errors
+      }
+    }
+    
+    logger.warn(`   ⏰ Bundle confirmation timed out after ${timeoutSeconds}s (${checkCount} checks)`);
+    return { 
+      confirmed: false, 
+      details: { 
+        timeout: true, 
+        timeoutSeconds, 
+        checkCount 
+      } 
+    };
+  }
+
+  /**
+   * FIXED: Additional verification to check if bundle transactions actually executed
+   */
+  async function verifyBundleExecution(
+    connection: Connection,
+    expectedMint: string,
+    tipSignature: string
+  ): Promise<{ executed: boolean; details: any }> {
+    logger.info(`🔍 VERIFYING BUNDLE EXECUTION:`);
+    
+    const verificationResults: any = {
+      tipTransaction: false,
+      mintExists: false,
+      tipSignature,
+      expectedMint
+    };
+    
+    try {
+      // 1. Verify tip transaction exists and succeeded
+      logger.info(`   1. Checking tip transaction: ${tipSignature}`);
+      const tipTx = await connection.getTransaction(tipSignature, {
+        maxSupportedTransactionVersion: 0,
+        commitment: 'confirmed'
+      });
+      
+      if (tipTx && !tipTx.meta?.err) {
+        logger.info(`   ✅ Tip transaction confirmed and successful`);
+        verificationResults.tipTransaction = true;
+        verificationResults.tipDetails = {
+          slot: tipTx.slot,
+          blockTime: tipTx.blockTime,
+          fee: tipTx.meta?.fee
+        };
+      } else if (tipTx && tipTx.meta?.err) {
+        logger.warn(`   ❌ Tip transaction failed:`, tipTx.meta.err);
+        verificationResults.tipError = tipTx.meta.err;
+      } else {
+        logger.warn(`   ❌ Tip transaction not found`);
+      }
+      
+      // 2. Verify token mint was created
+      logger.info(`   2. Checking if mint exists: ${expectedMint}`);
+      const mintInfo = await connection.getAccountInfo(new PublicKey(expectedMint));
+      
+      if (mintInfo) {
+        logger.info(`   ✅ Token mint exists on-chain`);
+        verificationResults.mintExists = true;
+        verificationResults.mintDetails = {
+          owner: mintInfo.owner.toBase58(),
+          lamports: mintInfo.lamports,
+          dataLength: mintInfo.data.length
+        };
+      } else {
+        logger.warn(`   ❌ Token mint does not exist`);
+      }
+      
+      // 3. Overall execution status
+      const executed = verificationResults.tipTransaction && verificationResults.mintExists;
+      
+      logger.info(`   📊 VERIFICATION SUMMARY:`);
+      logger.info(`     Tip transaction: ${verificationResults.tipTransaction ? '✅' : '❌'}`);
+      logger.info(`     Mint created: ${verificationResults.mintExists ? '✅' : '❌'}`);
+      logger.info(`     Overall execution: ${executed ? '✅ SUCCESS' : '❌ FAILED'}`);
+      
+      return { executed, details: verificationResults };
+      
+    } catch (error) {
+      logger.error(`   💥 Verification error: ${error}`);
+      verificationResults.verificationError = String(error);
+      return { executed: false, details: verificationResults };
+    }
+  }
+  
+  /**
    * Enhanced bundle submission with comprehensive logging
    */
   async function submitBundleDetailed(
@@ -209,15 +383,6 @@ import {
       } catch (error) {
         logger.warn(`     ⚠️ Failed to decode transaction ${index}: ${error}`);
       }
-    });
-    
-    // Log the exact bundle payload (truncated for readability)
-    logger.debug(`📋 Bundle payload structure:`, {
-      jsonrpc: bundleData.jsonrpc,
-      id: bundleData.id,
-      method: bundleData.method,
-      paramsLength: bundleData.params.length,
-      paramsType: typeof bundleData.params[0]
     });
     
     const requests = endpoints.map(async (url, index) => {
@@ -280,7 +445,6 @@ import {
         if (error instanceof AxiosError) {
           if (error.response) {
             logger.error(`   HTTP Error: ${error.response.status} ${error.response.statusText}`);
-            logger.error(`   Response headers:`, error.response.headers);
             logger.error(`   Response data:`, error.response.data);
             
             return { 
@@ -293,11 +457,6 @@ import {
             };
           } else if (error.request) {
             logger.error(`   No response received - timeout or network error`);
-            logger.error(`   Request config:`, {
-              url: error.config?.url,
-              method: error.config?.method,
-              timeout: error.config?.timeout
-            });
             
             return { 
               success: false, 
@@ -401,7 +560,6 @@ import {
       
       try {
         // FIXED: Use getTipAccounts instead of getInflightBundleStatuses
-        // This method doesn't require parameters and tests if the endpoint is responsive
         const testPayload = {
           jsonrpc: '2.0',
           id: 1,
@@ -511,13 +669,14 @@ import {
   }
   
   /**
-   * Enhanced bundle sending with detailed validation and logging
+   * Enhanced bundle sending with PROPER confirmation monitoring and verification
    */
   export async function sendJitoBundleDetailed(
     transactions: VersionedTransaction[],
     payer: Keypair,
     config: BundlerConfig,
-    options: JitoBundleOptions = {}
+    options: JitoBundleOptions = {},
+    expectedMint?: string  // Add expected mint for verification
   ): Promise<JitoBundleResult> {
     const {
       maxRetries = config.jitoMaxRetries,
@@ -532,6 +691,9 @@ import {
     logger.info(`   Max retries: ${maxRetries}`);
     logger.info(`   Timeout: ${timeoutSeconds}s`);
     logger.info(`   Endpoints: ${preferredEndpoints.length}`);
+    if (expectedMint) {
+      logger.info(`   Expected mint: ${expectedMint}`);
+    }
     
     // Enhanced transaction validation
     logger.info(`🔍 VALIDATING ALL TRANSACTIONS:`);
@@ -591,7 +753,7 @@ import {
         
         if (!submissionResult.success) {
           lastError = `Bundle submission failed: ${submissionResult.errors.map(e => e.error).join('; ')}`;
-          logger.warn(`❌ Attempt ${attempt} failed: ${lastError}`);
+          logger.warn(`❌ Attempt ${attempt} submission failed: ${lastError}`);
           
           if (attempt < maxRetries) {
             const waitTime = attempt * 2000;
@@ -601,15 +763,57 @@ import {
           continue;
         }
         
-        logger.info(`✅ Bundle submitted successfully!`);
+        logger.info(`✅ Bundle submitted successfully to ${submissionResult.results.length}/${preferredEndpoints.length} endpoints`);
         
-        // Return immediately with success (skip monitoring for now to debug submission)
-        return {
-          success: true,
-          signature: tipSignature,
-          bundleId: submissionResult.results[0]?.data?.result,
-          attempts: attempt,
-        };
+        // FIXED: Proper bundle confirmation monitoring
+        logger.info(`👀 MONITORING BUNDLE CONFIRMATION...`);
+        const confirmationResult = await monitorBundleConfirmationDetailed(
+          connection,
+          tipSignature,
+          timeoutSeconds
+        );
+        
+        if (confirmationResult.confirmed) {
+          logger.info(`🎉 Bundle confirmation detected!`);
+          
+          // ADDITIONAL: Verify actual execution if we have expected mint
+          if (expectedMint) {
+            logger.info(`🔍 VERIFYING COMPLETE BUNDLE EXECUTION...`);
+            const verificationResult = await verifyBundleExecution(
+              connection,
+              expectedMint,
+              tipSignature
+            );
+            
+            if (verificationResult.executed) {
+              logger.info(`✅ COMPLETE SUCCESS: Bundle executed and verified on-chain!`);
+              return {
+                success: true,
+                signature: tipSignature,
+                bundleId: submissionResult.results[0]?.data?.result,
+                attempts: attempt,
+                verificationDetails: verificationResult.details
+              };
+            } else {
+              lastError = `Bundle confirmed but verification failed: ${JSON.stringify(verificationResult.details)}`;
+              logger.error(`❌ Bundle verification failed:`, verificationResult.details);
+              // Continue to retry
+            }
+          } else {
+            // No mint to verify, just return success based on tip confirmation
+            logger.info(`✅ SUCCESS: Bundle confirmed (no additional verification)!`);
+            return {
+              success: true,
+              signature: tipSignature,
+              bundleId: submissionResult.results[0]?.data?.result,
+              attempts: attempt,
+              confirmationDetails: confirmationResult.details
+            };
+          }
+        } else {
+          lastError = `Bundle submitted but failed to confirm: ${JSON.stringify(confirmationResult.details)}`;
+          logger.warn(`⏰ Attempt ${attempt} confirmation failed:`, confirmationResult.details);
+        }
         
       } catch (error) {
         lastError = error instanceof Error ? error.message : 'Unknown error';
@@ -620,14 +824,15 @@ import {
         }
       }
       
+      // Wait before retry (except on last attempt)
       if (attempt < maxRetries) {
-        const waitTime = attempt * 2000;
+        const waitTime = attempt * 2000; // 2s, 4s, 6s...
         logger.info(`⏳ Waiting ${waitTime}ms before retry...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
       }
     }
     
-    logger.error(`❌ Bundle failed after ${maxRetries} attempts. Final error: ${lastError}`);
+    logger.error(`❌ Bundle failed after ${maxRetries} attempts. Last error: ${lastError}`);
     return {
       success: false,
       error: lastError,
@@ -636,12 +841,13 @@ import {
   }
   
   /**
-   * Smart bundle submission with FIXED endpoint selection
+   * Smart bundle submission with FIXED endpoint selection and verification
    */
   export async function sendSmartJitoBundle(
     transactions: VersionedTransaction[],
     payer: Keypair,
-    config: BundlerConfig
+    config: BundlerConfig,
+    expectedMint?: string  // Add expected mint for verification
   ): Promise<JitoBundleResult> {
     
     // OPTION 1: Try with endpoint testing first
@@ -657,7 +863,7 @@ import {
           preferredEndpoints: endpointStatus.available,
         };
         
-        const result = await sendJitoBundleDetailed(transactions, payer, config, options);
+        const result = await sendJitoBundleDetailed(transactions, payer, config, options, expectedMint);
         if (result.success) {
           return result;
         }
@@ -676,7 +882,7 @@ import {
         preferredEndpoints: JITO_ENDPOINTS, // Use all endpoints
       };
       
-      const result = await sendJitoBundleDetailed(transactions, payer, config, options);
+      const result = await sendJitoBundleDetailed(transactions, payer, config, options, expectedMint);
       if (result.success) {
         return result;
       }
@@ -706,13 +912,16 @@ import {
     }
   }
   
-  
   // Export the enhanced functions
   export { 
     sendJitoBundleDetailed as sendJitoBundle,
     checkJitoEndpointsDetailed as checkJitoEndpoints,
     validateTransactionDetailed as validateTransaction 
   };
+  
+  /**
+   * Fallback function to send transactions individually
+   */
   export async function sendTransactionsIndividually(
     transactions: VersionedTransaction[],
     connection: Connection,
