@@ -7,7 +7,7 @@ import {
     VersionedTransaction,
   } from '@solana/web3.js';
   import axios, { AxiosError } from 'axios';
-  import base58 from 'base-58';
+  import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes';
   import { BundlerConfig } from './config';
   import { logger } from './utils/logger';
   
@@ -56,6 +56,46 @@ import {
   }
   
   /**
+   * Validates a transaction before adding to bundle
+   */
+  function validateTransaction(tx: VersionedTransaction, index: number): { valid: boolean; errors: string[] } {
+    const errors: string[] = [];
+    
+    try {
+      // Check if transaction is properly signed
+      if (tx.signatures.length === 0) {
+        errors.push(`Transaction ${index} has no signatures`);
+      }
+      
+      // Check if signature is not all zeros
+      if (tx.signatures[0] && tx.signatures[0].every(byte => byte === 0)) {
+        errors.push(`Transaction ${index} has invalid signature (all zeros)`);
+      }
+      
+      // Check transaction size
+      const serialized = tx.serialize();
+      if (serialized.length > 1232) { // Solana transaction size limit
+        errors.push(`Transaction ${index} too large: ${serialized.length} bytes (max 1232)`);
+      }
+      
+      // Check if message is valid
+      if (!tx.message) {
+        errors.push(`Transaction ${index} has no message`);
+      }
+      
+      logger.debug(`   TX ${index}: ${serialized.length} bytes, ${tx.signatures.length} signatures`);
+      
+    } catch (error) {
+      errors.push(`Transaction ${index} validation error: ${error}`);
+    }
+    
+    return {
+      valid: errors.length === 0,
+      errors,
+    };
+  }
+  
+  /**
    * Creates a tip transaction for Jito
    */
   async function createTipTransaction(
@@ -67,7 +107,7 @@ import {
     
     logger.debug(`Creating tip transaction: ${tipLamports} lamports to ${tipAccount.toBase58()}`);
     
-    const { blockhash } = await connection.getLatestBlockhash();
+    const { blockhash, lastValidBlockHeight } = await connection.getLatestBlockhash();
     
     const tipTx = new VersionedTransaction(
       new TransactionMessage({
@@ -84,11 +124,22 @@ import {
     );
     
     tipTx.sign([payer]);
+    
+    // Validate tip transaction
+    const validation = validateTransaction(tipTx, 0);
+    if (!validation.valid) {
+      throw new Error(`Tip transaction validation failed: ${validation.errors.join(', ')}`);
+    }
+    
+    logger.debug(`✅ Tip transaction created and validated`);
+    logger.debug(`   Blockhash: ${blockhash}`);
+    logger.debug(`   Last valid block height: ${lastValidBlockHeight}`);
+    
     return tipTx;
   }
   
   /**
-   * Submits a bundle to Jito block engines
+   * Submits a bundle to Jito block engines with detailed logging
    */
   async function submitBundle(
     serializedTransactions: string[],
@@ -102,35 +153,106 @@ import {
       params: [serializedTransactions],
     };
     
-    logger.debug(`Submitting bundle to ${endpoints.length} endpoints`);
+    logger.info(`📦 Submitting bundle to ${endpoints.length} endpoints`);
+    logger.debug(`📊 Bundle details:`);
+    logger.debug(`   Transactions: ${serializedTransactions.length}`);
+    logger.debug(`   Total bundle size: ${JSON.stringify(bundleData).length} bytes`);
+    logger.debug(`   Timeout: ${timeoutMs}ms`);
     
-    const requests = endpoints.map(async (url) => {
+    // Log first few chars of each transaction for debugging
+    serializedTransactions.forEach((tx, index) => {
+      logger.debug(`   TX ${index}: ${tx.substring(0, 20)}... (${tx.length} chars)`);
+    });
+    
+    const requests = endpoints.map(async (url, index) => {
+      const startTime = Date.now();
+      
       try {
+        logger.debug(`🚀 Submitting to endpoint ${index + 1}: ${url}`);
+        
         const response = await axios.post(url, bundleData, {
           timeout: timeoutMs,
           headers: {
             'Content-Type': 'application/json',
+            'User-Agent': 'Solana-Bundle-Client/1.0',
           },
+          validateStatus: () => true, // Don't throw on HTTP errors
         });
         
-        logger.debug(`Bundle submitted successfully to ${url}`);
-        return { success: true, data: response.data, endpoint: url };
+        const duration = Date.now() - startTime;
+        
+        logger.debug(`📤 Response from ${url}: ${response.status} in ${duration}ms`);
+        
+        if (response.status === 200) {
+          logger.debug(`✅ Success response:`, response.data);
+          return { success: true, data: response.data, endpoint: url, duration };
+        } else {
+          // Log the full error response for debugging
+          logger.warn(`❌ HTTP ${response.status} from ${url}:`);
+          logger.warn(`   Status text: ${response.statusText}`);
+          logger.warn(`   Response data:`, response.data);
+          
+          if (response.data && typeof response.data === 'object') {
+            if (response.data.error) {
+              logger.warn(`   Error details:`, response.data.error);
+            }
+            if (response.data.message) {
+              logger.warn(`   Message: ${response.data.message}`);
+            }
+          }
+          
+          return { 
+            success: false, 
+            error: `HTTP ${response.status}: ${response.statusText}`, 
+            endpoint: url,
+            responseData: response.data,
+            duration 
+          };
+        }
         
       } catch (error) {
-        let errorMessage = 'Unknown error';
+        const duration = Date.now() - startTime;
         
         if (error instanceof AxiosError) {
+          logger.warn(`❌ Network error to ${url}:`);
+          
           if (error.response) {
-            errorMessage = `HTTP ${error.response.status}: ${error.response.data?.message || error.response.statusText}`;
+            logger.warn(`   HTTP ${error.response.status}: ${error.response.statusText}`);
+            logger.warn(`   Response data:`, error.response.data);
+            
+            return { 
+              success: false, 
+              error: `HTTP ${error.response.status}: ${error.response.data?.message || error.response.statusText}`, 
+              endpoint: url,
+              responseData: error.response.data,
+              duration 
+            };
           } else if (error.request) {
-            errorMessage = 'Network error - no response received';
+            logger.warn(`   No response received (timeout/network)`);
+            return { 
+              success: false, 
+              error: 'Network timeout or connection failed', 
+              endpoint: url,
+              duration 
+            };
           } else {
-            errorMessage = error.message;
+            logger.warn(`   Request setup error: ${error.message}`);
+            return { 
+              success: false, 
+              error: error.message, 
+              endpoint: url,
+              duration 
+            };
           }
         }
         
-        logger.debug(`Bundle submission failed to ${url}: ${errorMessage}`);
-        return { success: false, error: errorMessage, endpoint: url };
+        logger.warn(`❌ Unknown error to ${url}: ${error}`);
+        return { 
+          success: false, 
+          error: String(error), 
+          endpoint: url,
+          duration 
+        };
       }
     });
     
@@ -150,6 +272,21 @@ import {
         }
       });
     
+    // Log detailed summary
+    logger.info(`📊 Bundle submission summary:`);
+    logger.info(`   Successful: ${successful.length}/${endpoints.length}`);
+    logger.info(`   Failed: ${failed.length}/${endpoints.length}`);
+    
+    if (failed.length > 0) {
+      logger.warn(`❌ Failure details:`);
+      failed.forEach((failure, index) => {
+        logger.warn(`   ${index + 1}. ${failure.endpoint}: ${failure.error}`);
+        if (failure.responseData) {
+          logger.warn(`      Response:`, failure.responseData);
+        }
+      });
+    }
+    
     return {
       success: successful.length > 0,
       results: successful,
@@ -165,36 +302,43 @@ import {
     tipSignature: string,
     timeoutSeconds: number = 30
   ): Promise<boolean> {
-    logger.debug(`Monitoring bundle confirmation for tip: ${tipSignature}`);
+    logger.debug(`👀 Monitoring bundle confirmation for tip: ${tipSignature}`);
     
     const startTime = Date.now();
     const timeoutMs = timeoutSeconds * 1000;
+    let checkCount = 0;
     
     while (Date.now() - startTime < timeoutMs) {
       try {
+        checkCount++;
         const status = await connection.getSignatureStatus(tipSignature);
+        
+        logger.debug(`   Check ${checkCount}: ${status.value ? 'Found' : 'Not found'}`);
         
         if (status.value) {
           if (status.value.err) {
-            logger.debug(`Bundle failed: ${JSON.stringify(status.value.err)}`);
+            logger.warn(`❌ Bundle transaction failed:`, status.value.err);
             return false;
           }
           
           if (status.value.confirmationStatus === 'confirmed' || status.value.confirmationStatus === 'finalized') {
-            logger.debug('Bundle confirmed successfully');
+            logger.info(`✅ Bundle confirmed! Status: ${status.value.confirmationStatus}`);
+            logger.info(`   Slot: ${status.value.slot}`);
             return true;
           }
+          
+          logger.debug(`   Status: ${status.value.confirmationStatus}, Slot: ${status.value.slot}`);
         }
         
         // Wait 2 seconds before next check
         await new Promise(resolve => setTimeout(resolve, 2000));
         
       } catch (error) {
-        logger.debug(`Error checking bundle status: ${error}`);
+        logger.debug(`⚠️  Error checking bundle status: ${error}`);
       }
     }
     
-    logger.debug('Bundle confirmation timed out');
+    logger.warn(`⏰ Bundle confirmation timed out after ${timeoutSeconds}s (${checkCount} checks)`);
     return false;
   }
   
@@ -216,24 +360,51 @@ import {
     
     logger.info(`🚀 Sending bundle via Jito (${transactions.length} transactions, ${tipLamports} lamport tip)`);
     
+    // Validate all transactions before proceeding
+    logger.debug(`🔍 Validating ${transactions.length} transactions...`);
+    let hasValidationErrors = false;
+    
+    for (let i = 0; i < transactions.length; i++) {
+      const validation = validateTransaction(transactions[i], i + 1);
+      if (!validation.valid) {
+        logger.error(`❌ Transaction ${i + 1} validation failed:`);
+        validation.errors.forEach(error => logger.error(`   ${error}`));
+        hasValidationErrors = true;
+      }
+    }
+    
+    if (hasValidationErrors) {
+      return {
+        success: false,
+        error: 'Transaction validation failed - check logs above',
+        attempts: 0,
+      };
+    }
+    
     let lastError: string = '';
     
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
-        logger.debug(`Bundle attempt ${attempt}/${maxRetries}`);
+        logger.info(`🎯 Bundle attempt ${attempt}/${maxRetries}`);
         
         // Create tip transaction
         const connection = new Connection(config.rpcUrl, 'confirmed');
         const tipTx = await createTipTransaction(connection, payer, tipLamports);
-        const tipSignature = base58.encode(tipTx.signatures[0]);
+        const tipSignature = bs58.encode(tipTx.signatures[0]);
+        
+        logger.debug(`💰 Tip signature: ${tipSignature}`);
         
         // Serialize all transactions
         const serializedTxs = [
-          base58.encode(tipTx.serialize()),
-          ...transactions.map(tx => base58.encode(tx.serialize()))
+          bs58.encode(tipTx.serialize()),
+          ...transactions.map((tx, index) => {
+            const serialized = bs58.encode(tx.serialize());
+            logger.debug(`📦 Transaction ${index + 1} serialized: ${serialized.length} chars`);
+            return serialized;
+          })
         ];
         
-        logger.debug(`Bundle contains ${serializedTxs.length} transactions (including tip)`);
+        logger.info(`📦 Bundle contains ${serializedTxs.length} transactions (including tip)`);
         
         // Submit bundle
         const submissionResult = await submitBundle(
@@ -245,11 +416,20 @@ import {
         if (!submissionResult.success) {
           const errorMessages = submissionResult.errors.map(e => `${e.endpoint}: ${e.error}`).join('; ');
           lastError = `Bundle submission failed to all endpoints: ${errorMessages}`;
-          logger.warn(`Attempt ${attempt} failed: ${lastError}`);
+          logger.warn(`❌ Attempt ${attempt} failed: ${lastError}`);
+          
+          // Log detailed error analysis
+          const errorTypes: { [key: string]: number } = {};
+          submissionResult.errors.forEach(error => {
+            const errorType = error.error.split(':')[0];
+            errorTypes[errorType] = (errorTypes[errorType] || 0) + 1;
+          });
+          
+          logger.warn(`📊 Error analysis:`, errorTypes);
           
           if (attempt < maxRetries) {
             const waitTime = attempt * 2000; // Exponential backoff
-            logger.debug(`Waiting ${waitTime}ms before retry...`);
+            logger.debug(`⏳ Waiting ${waitTime}ms before retry...`);
             await new Promise(resolve => setTimeout(resolve, waitTime));
           }
           continue;
@@ -274,18 +454,22 @@ import {
           };
         } else {
           lastError = 'Bundle submitted but failed to confirm within timeout';
-          logger.warn(`Attempt ${attempt} failed: ${lastError}`);
+          logger.warn(`⏰ Attempt ${attempt} failed: ${lastError}`);
         }
         
       } catch (error) {
         lastError = error instanceof Error ? error.message : 'Unknown error';
-        logger.warn(`Attempt ${attempt} failed with error: ${lastError}`);
+        logger.error(`💥 Attempt ${attempt} failed with error: ${lastError}`);
+        
+        if (error instanceof Error && error.stack) {
+          logger.debug(`Stack trace:`, error.stack);
+        }
       }
       
       // Wait before retry (except on last attempt)
       if (attempt < maxRetries) {
         const waitTime = attempt * 2000; // 2s, 4s, 6s...
-        logger.debug(`Waiting ${waitTime}ms before retry...`);
+        logger.debug(`⏳ Waiting ${waitTime}ms before retry...`);
         await new Promise(resolve => setTimeout(resolve, waitTime));
       }
     }
@@ -298,6 +482,8 @@ import {
     };
   }
   
+  export { validateTransaction };
+
   /**
    * Fallback function to send transactions individually
    */
@@ -345,88 +531,7 @@ import {
       errors,
     };
   }
-  
-  /**
-   * Gets current Jito tip recommendations
-   */
-  export async function getJitoTipRecommendation(): Promise<number> {
-    try {
-      // This would typically query Jito's API for current tip recommendations
-      // For now, we'll return a reasonable default
-      const baseTip = 1000000; // 0.001 SOL
-      const networkCongestionMultiplier = 1.0; // Could be dynamic based on network conditions
-      
-      return Math.floor(baseTip * networkCongestionMultiplier);
-      
-    } catch (error) {
-      logger.debug(`Failed to get tip recommendation: ${error}`);
-      return 1000000; // Fallback to 0.001 SOL
-    }
-  }
-  
-  /**
-   * Validates bundle before submission
-   */
-  export function validateBundle(transactions: VersionedTransaction[]): { valid: boolean; errors: string[] } {
-    const errors: string[] = [];
-    
-    if (transactions.length === 0) {
-      errors.push('Bundle cannot be empty');
-    }
-    
-    if (transactions.length > 5) {
-      errors.push('Bundle cannot contain more than 5 transactions');
-    }
-    
-    // Check that all transactions are properly signed
-    for (let i = 0; i < transactions.length; i++) {
-      const tx = transactions[i];
-      if (tx.signatures.length === 0 || tx.signatures[0].every(byte => byte === 0)) {
-        errors.push(`Transaction ${i + 1} is not properly signed`);
-      }
-    }
-    
-    // Check for duplicate transactions
-    const signatures = transactions.map(tx => base58.encode(tx.signatures[0]));
-    const uniqueSignatures = new Set(signatures);
-    if (signatures.length !== uniqueSignatures.size) {
-      errors.push('Bundle contains duplicate transactions');
-    }
-    
-    return {
-      valid: errors.length === 0,
-      errors,
-    };
-  }
-  
-  /**
-   * Estimates bundle cost (including tips and fees)
-   */
-  export function estimateBundleCost(
-    transactionCount: number,
-    tipLamports: number,
-    priorityFeeMicroLamports: number = 200000,
-    computeUnitsPerTx: number = 5000000
-  ): { totalCostLamports: number; breakdown: any } {
-    const tipCost = tipLamports;
-    const priorityFeeCostPerTx = Math.ceil((priorityFeeMicroLamports * computeUnitsPerTx) / 1000000);
-    const totalPriorityFees = priorityFeeCostPerTx * transactionCount;
-    const baseFeePerTx = 5000; // 0.000005 SOL per signature
-    const totalBaseFees = baseFeePerTx * transactionCount;
-    
-    const totalCost = tipCost + totalPriorityFees + totalBaseFees;
-    
-    return {
-      totalCostLamports: totalCost,
-      breakdown: {
-        jitoTip: tipCost,
-        priorityFees: totalPriorityFees,
-        baseFees: totalBaseFees,
-        transactionCount,
-      },
-    };
-  }
-  
+
   /**
    * Check if Jito endpoints are available
    */
@@ -457,7 +562,7 @@ import {
     
     return { available, unavailable };
   }
-  
+
   /**
    * Smart bundle submission with endpoint selection
    */

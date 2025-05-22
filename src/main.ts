@@ -1,7 +1,7 @@
 import { config } from 'dotenv';
 import fs from 'fs';
 import path from 'path';
-import inquirer from 'inquirer';
+// Remove inquirer import - we'll use readline instead
 import { SecurePumpBundler } from './bundler';
 import { loadConfig, validateEnvironment } from './config';
 import { logger } from './utils/logger';
@@ -18,6 +18,7 @@ interface TokenMetadata {
   website?: string;
 }
 
+// Simple confirmation using readline (built-in Node.js)
 async function confirmProceed(config: any): Promise<boolean> {
   const totalCost = (config.walletCount * config.swapAmountSol) + 0.01;
   
@@ -31,16 +32,20 @@ async function confirmProceed(config: any): Promise<boolean> {
     return true;
   }
 
-  const { confirm } = await inquirer.prompt([
-    {
-      type: 'confirm',
-      name: 'confirm',
-      message: '🚀 Do you want to proceed with token creation and bundling?',
-      default: false,
-    },
-  ]);
+  // Use readline for confirmation
+  const readline = require('readline');
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
 
-  return confirm;
+  return new Promise((resolve) => {
+    rl.question('\n🚀 Do you want to proceed with token creation and bundling? (y/N): ', (answer: string) => {
+      rl.close();
+      const confirmed = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
+      resolve(confirmed);
+    });
+  });
 }
 
 async function getTokenMetadata(): Promise<TokenMetadata> {
@@ -135,7 +140,8 @@ async function main() {
     
     // Create and bundle token
     logger.info('\n🚀 Starting token creation and bundling...');
-    const result = await bundler.createAndBundle(tokenMetadata);
+    const testMode = process.env.TEST_MODE === 'true';
+    const result = await bundler.createAndBundle(tokenMetadata, testMode);
     
     if (result.success) {
       logger.info('\n🎉 SUCCESS! Token created and bundled successfully!');

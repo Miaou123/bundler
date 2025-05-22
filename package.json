@@ -44,30 +44,25 @@
     "url": "https://github.com/yourusername/secure-pump-bundler.git"
   },
   "dependencies": {
-    "@solana/web3.js": "^1.95.0",
-    "@solana/spl-token": "^0.4.0",
     "@coral-xyz/anchor": "^0.30.1",
+    "@solana/spl-token": "^0.4.0",
+    "@solana/web3.js": "^1.95.0",
     "axios": "^1.6.8",
-    "dotenv": "^16.4.5",
     "bn.js": "^5.2.1",
-    "base-58": "^0.0.1",
-    "winston": "^3.11.0",
-    "chalk": "^4.1.2",
-    "inquirer": "^9.2.12",
-    "cli-progress": "^3.12.0"
+    "dotenv": "^16.4.5",
+    "winston": "^3.11.0"
   },
   "devDependencies": {
+    "@types/bn.js": "^5.1.6",
     "@types/node": "^20.14.1",
-    "@types/bn.js": "^5.1.5",
-    "@types/inquirer": "^9.0.7",
-    "typescript": "^5.3.3",
-    "ts-node": "^10.9.2",
-    "eslint": "^8.57.0",
     "@typescript-eslint/eslint-plugin": "^6.21.0",
     "@typescript-eslint/parser": "^6.21.0",
+    "cross-env": "^7.0.3",
+    "eslint": "^8.57.0",
     "prettier": "^3.1.1",
     "rimraf": "^5.0.5",
-    "cross-env": "^7.0.3"
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
   },
   "optionalDependencies": {
     "fsevents": "^2.3.3"

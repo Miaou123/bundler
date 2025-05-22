@@ -2,7 +2,8 @@
 
 require('dotenv').config();
 const { Connection, Keypair, LAMPORTS_PER_SOL } = require('@solana/web3.js');
-const base58 = require('base-58');
+// Use anchor's bs58 instead of base-58
+const { bs58 } = require('@coral-xyz/anchor/dist/cjs/utils/bytes');
 
 async function checkBalance() {
   try {
@@ -26,7 +27,7 @@ async function checkBalance() {
     // Load wallet
     let keypair;
     try {
-      const privateKey = process.env.MAIN_WALLET_PRIVATE_KEY;
+      const privateKey = process.env.MAIN_WALLET_PRIVATE_KEY.trim();
       let secretKey;
       
       if (privateKey.startsWith('[')) {
@@ -34,12 +35,12 @@ async function checkBalance() {
         secretKey = new Uint8Array(JSON.parse(privateKey));
       } else {
         // Base58 format
-        secretKey = base58.decode(privateKey);
+        secretKey = bs58.decode(privateKey);
       }
       
       keypair = Keypair.fromSecretKey(secretKey);
     } catch (error) {
-      console.error('❌ Invalid private key format');
+      console.error('❌ Invalid private key format:', error.message);
       process.exit(1);
     }
     
@@ -97,19 +98,36 @@ async function checkBalance() {
     
     if (isMainnet && balanceSOL > 0.1) {
       console.log('\n⚠️  MAINNET DETECTED with significant balance');
-      console.log('   Please test on devnet first!');
+      console.log('   Please double-check everything before proceeding!');
     }
     
     // Cost in USD (rough estimate)
-    const solPriceUSD = 150; // Rough estimate - you could fetch this from an API
+    const solPriceUSD = 200; // Updated estimate
     const costUSD = totalNeeded * solPriceUSD;
     console.log(`\n💵 Estimated cost: $${costUSD.toFixed(2)} USD (at $${solPriceUSD}/SOL)`);
+    
+    // Final recommendation
+    console.log('\n🎯 RECOMMENDATION:');
+    if (sufficient) {
+      if (totalNeeded < 0.01) {
+        console.log('   ✅ Perfect for testing - very low cost');
+      } else if (totalNeeded < 0.05) {
+        console.log('   ✅ Good for testing - reasonable cost');
+      } else {
+        console.log('   ⚠️  Consider reducing amounts for first test');
+      }
+    } else {
+      console.log('   ❌ Add more SOL before proceeding');
+    }
     
   } catch (error) {
     console.error('❌ Error checking balance:', error.message);
     
     if (error.message.includes('fetch')) {
       console.log('\n💡 This might be a network issue. Check your RPC_URL');
+    } else if (error.message.includes('decode')) {
+      console.log('\n💡 This might be a private key format issue');
+      console.log('   Try running: node scripts/validate-private-key.js');
     }
     
     process.exit(1);

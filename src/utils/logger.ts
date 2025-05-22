@@ -66,6 +66,7 @@ if (process.env.SAVE_LOGS_TO_FILE !== 'false') {
   );
   
   // Transaction log file (for important transaction data)
+  // Note: Removed the 'filter' property as it's not supported
   transports.push(
     new winston.transports.File({
       filename: path.join(logsDir, 'transactions.log'),
@@ -73,8 +74,6 @@ if (process.env.SAVE_LOGS_TO_FILE !== 'false') {
       format: fileFormat,
       maxsize: 10485760, // 10MB
       maxFiles: 5,
-      // Only log messages with transaction metadata
-      filter: (info) => info.transaction === true,
     })
   );
 }

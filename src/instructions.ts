@@ -8,7 +8,7 @@ import {
     TOKEN_PROGRAM_ID,
     ASSOCIATED_TOKEN_PROGRAM_ID,
   } from '@solana/spl-token';
-  import { BN } from 'bn.js';
+  import BN from 'bn.js'; // Import BN properly for TypeScript
   
   // Program constants
   export const PUMP_PROGRAM_ID = new PublicKey('6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P');

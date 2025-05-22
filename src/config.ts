@@ -1,5 +1,5 @@
 import { Keypair } from '@solana/web3.js';
-import base58 from 'base-58';
+import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes';
 import { logger } from './utils/logger';
 
 export interface BundlerConfig {
@@ -99,7 +99,7 @@ export function loadConfig(): BundlerConfig {
       secretKey = new Uint8Array(keyArray);
     } else {
       // Base58 format
-      secretKey = base58.decode(privateKeyString);
+      secretKey = bs58.decode(privateKeyString);
     }
     
     // Validate key length
