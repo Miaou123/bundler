@@ -268,7 +268,7 @@ export class PumpFunSDK {
 
     console.log(`🎯 Built ${versionedTransactions.length} versioned transactions for Jito bundle`);
 
-    // 4. Import and use your existing Jito bundling system
+    // 4. FIXED: Import and use the ENHANCED Jito bundling system with detailed logging
     const { sendSmartJitoBundle } = await import('./jito');
     
     // Create a minimal config object for Jito (using your BundlerConfig structure)
@@ -304,8 +304,8 @@ export class PumpFunSDK {
       balanceCheckInterval: 10,
     };
 
-    // 5. Send via Jito bundle
-    console.log(`🚀 Sending Jito bundle...`);
+    // 5. Send via Jito bundle with enhanced debugging
+    console.log(`🚀 Sending Jito bundle with enhanced debugging...`);
     const jitoResult = await sendSmartJitoBundle(
       versionedTransactions,
       creator, // Payer
