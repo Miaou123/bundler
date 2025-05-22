@@ -1,0 +1,41 @@
+{
+  "sessionId": "bundler_1747940192145_ub7zyr0s3",
+  "mainWallet": "DgkKcvsCAQtuwz1ithzyd7SQzJo1rCoccMyzgsZaWan1",
+  "createdAt": "2025-05-22T18:56:32.148Z",
+  "network": "mainnet-beta",
+  "rpcUrl": "https://api.mainnet-beta.solana.com",
+  "walletCount": 3,
+  "swapAmountSol": 0.0005,
+  "wallets": [
+    {
+      "address": "67peAQBLnXBZ8wcM6okcp7fbs6UAD4ptu5HuviqXXpXq",
+      "privateKey": "5wrUs4N4BfSPTVyS3QwrCMKuyjEyT9jGVVTfA3ouyN3PxkfvqApo3ooahCC3sSmM2Wu7BLWSTgHFnybS5cGhh5Lj",
+      "index": 0,
+      "createdAt": "2025-05-22T18:56:32.147Z"
+    },
+    {
+      "address": "HjKfUadNcH83Bft7CvypSRxGD1ps3EtpC3svUgaUUxD9",
+      "privateKey": "3h8S2aSVnqAQW4rW5aHeLxLUU4a6yE89cQzVr3z1zn1AfzU4aZDohiPMVEEzs7YKorhGgXk9w71Amco43maTP7to",
+      "index": 1,
+      "createdAt": "2025-05-22T18:56:32.147Z"
+    },
+    {
+      "address": "4sYBKT3Ao2p4RbKfNiuvieBC2vrcEjqQQBfrWw56R6UX",
+      "privateKey": "fkvnrHxC6EFxWuodcETTqKjmrjejGneRTLsGoBQxLuVDnzBac44Hi5ug2VepKy6zgjECpCqhD9SXdcGjmyUwfTd",
+      "index": 2,
+      "createdAt": "2025-05-22T18:56:32.148Z"
+    }
+  ],
+  "status": "cleaned_up",
+  "lastUpdated": "2025-05-22T18:56:34.360Z",
+  "distributionSignature": "3xNY9FaPAZ9HYfWH2oGNxd9myxkYzs3t9hVNKoSvF2yAG5zoDS59pUJvwoeveBCLW7BBtzXhaGNWVP1ZS8xjRr1Z",
+  "mintAddress": "6MsQPW5YNgY7a7zDJ2QepJ8ux7T9MfN1eHy3xvPeWdaN",
+  "error": "fetch failed",
+  "cleanupResults": {
+    "walletsProcessed": 3,
+    "successfulCleanups": 0,
+    "totalRecoveredLamports": 0,
+    "totalRecoveredSOL": 0,
+    "cleanupTimestamp": "2025-05-22T18:56:34.360Z"
+  }
+}

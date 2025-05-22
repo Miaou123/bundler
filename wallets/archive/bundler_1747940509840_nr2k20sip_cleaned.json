@@ -1,0 +1,41 @@
+{
+  "sessionId": "bundler_1747940509840_nr2k20sip",
+  "mainWallet": "DgkKcvsCAQtuwz1ithzyd7SQzJo1rCoccMyzgsZaWan1",
+  "createdAt": "2025-05-22T19:01:49.842Z",
+  "network": "mainnet-beta",
+  "rpcUrl": "https://api.mainnet-beta.solana.com",
+  "walletCount": 3,
+  "swapAmountSol": 0.0005,
+  "wallets": [
+    {
+      "address": "4JUhg7xYZ8LHUMMCVKfKMEP3ivcvM6YzBLRVsVXZGUjS",
+      "privateKey": "3Sm61Lsp6SLaNJ9kMQQJwY7G1TPFXevgedHMpKTHcLJzgLD4cxbQ4VEfJGTpd7u9K4jdmjfZQdcFhzucrhdZPnyE",
+      "index": 0,
+      "createdAt": "2025-05-22T19:01:49.842Z"
+    },
+    {
+      "address": "DkpMUwe4BfUmFQG3XzqzaPp3R2B3mzywbiZ1FTfURgT5",
+      "privateKey": "4QAXfZZo8VDWjbp9ebx59eUrcPyziC28GDxuGEPFrbpqCaXFZ8jzDojq8usegxeG2CEC6Mtnn6KHewAUf3TT4ioD",
+      "index": 1,
+      "createdAt": "2025-05-22T19:01:49.842Z"
+    },
+    {
+      "address": "9GicDdZcgvYYmUXJXyx6jTiExWpw2EXbqQqb34MFjzsD",
+      "privateKey": "jMV7KM7HgTUKJvvcfTaJQCCVaLJq9SvCXLQoyLrHNH9C9NohQGoq56aMUqiZbCbZRH6d6CdS53bMsNUmd1cBpHR",
+      "index": 2,
+      "createdAt": "2025-05-22T19:01:49.842Z"
+    }
+  ],
+  "status": "cleaned_up",
+  "lastUpdated": "2025-05-22T19:01:55.925Z",
+  "distributionSignature": "63GXerpRHdvubJvzReAx5kjXaLyQrUsoYpM4wSWmLtEqnUD9hGqJbMcDXLu4wNtVhHBcuASizdWpxuhndCkNYmAA",
+  "mintAddress": "6ae6C9iBFM2wKnJyy9kRs27nVB2V3LkX99mjdoGGHbNt",
+  "error": "Bonding curve account not found: 6ae6C9iBFM2wKnJyy9kRs27nVB2V3LkX99mjdoGGHbNt",
+  "cleanupResults": {
+    "walletsProcessed": 3,
+    "successfulCleanups": 3,
+    "totalRecoveredLamports": 16485000,
+    "totalRecoveredSOL": 0.016485,
+    "cleanupTimestamp": "2025-05-22T19:01:55.924Z"
+  }
+}
