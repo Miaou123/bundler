@@ -14,6 +14,7 @@ import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes';
 import fs from 'fs';
 import path from 'path';
 import { AnchorProvider, Wallet } from '@coral-xyz/anchor';
+import { BundledBuy } from './pumpfun';
 
 // Import the WORKING PumpFun SDK
 import { PumpFunSDK, DEFAULT_DECIMALS } from './sdk/index';
@@ -121,7 +122,6 @@ export class SecurePumpBundler {
       logger.info('🧪 TEST MODE - Validating working SDK...');
       
       try {
-        // Test global account access (using the working SDK)
         const globalAccount = await this.pumpFunSDK.getGlobalAccount();
         logger.info(`✅ Working SDK validated successfully!`);
         logger.info(`   Fee recipient: ${globalAccount.feeRecipient.toBase58()}`);
@@ -141,19 +141,18 @@ export class SecurePumpBundler {
         };
       }
     }
-
+  
     try {
-      logger.info('🚀 Starting token creation and buying with working SDK...');
+      logger.info('🚀 Starting bundled token creation and buying...');
       
       // Step 1: Distribute SOL to wallets
       await this.distributeSOL();
       
-      // Step 2: Prepare token metadata (exactly like in the working examples)
+      // Step 2: Prepare token metadata
       if (!fs.existsSync(metadata.imagePath)) {
         throw new Error(`Token image not found: ${metadata.imagePath}`);
       }
       
-      // Read the file and create a proper Blob (like in the working example)
       const imageData = fs.readFileSync(metadata.imagePath);
       const imageBlob = new Blob([imageData], { type: 'image/png' });
       
@@ -167,88 +166,63 @@ export class SecurePumpBundler {
         website: metadata.website,
       };
       
-      // Step 3: Create mint keypair (like in the working example)
+      // Step 3: Create mint keypair
       const mint = Keypair.generate();
       logger.info(`🪙 Creating token with mint: ${mint.publicKey.toBase58()}`);
       
-      // Step 4: Create token with initial buy (EXACTLY like the working example)
+      // Step 4: Prepare bundled buys
       const buyAmountSol = BigInt(Math.floor(this.config.swapAmountSol * LAMPORTS_PER_SOL));
       const slippageBasisPoints = BigInt(this.config.slippageBasisPoints);
       
-      logger.info('🔨 Creating token with initial buy using working SDK...');
+      // Create bundled buys for all wallets
+      const bundledBuys: BundledBuy[] = this.wallets.map((wallet, index) => {
+        // Add randomization to buy amounts (±20%)
+        const variance = 0.8 + (Math.random() * 0.4); // 0.8 to 1.2
+        const randomizedAmount = BigInt(Math.floor(Number(buyAmountSol) * variance));
+        
+        logger.info(`   Wallet ${index + 1}: ${wallet.publicKey.toBase58().slice(0, 8)}... - ${Number(randomizedAmount) / LAMPORTS_PER_SOL} SOL`);
+        
+        return {
+          wallet,
+          solAmount: randomizedAmount,
+        };
+      });
+      
+      logger.info('🔨 Creating bundled transaction with working SDK...');
       
       const priorityFees: PriorityFee = {
         unitLimit: this.config.priorityFee.unitLimit,
         unitPrice: this.config.priorityFee.unitPrice,
       };
       
-      const createResult = await this.pumpFunSDK.createAndBuy(
-        this.config.mainWallet,  // creator
-        mint,                    // mint
-        createTokenMetadata,     // metadata
-        buyAmountSol,           // buyAmountSol
-        slippageBasisPoints,    // slippageBasisPoints
-        priorityFees,           // priorityFees
-        'confirmed',            // commitment
-        'confirmed'             // finality
+      // Step 5: Execute bundled create and buy
+      const createResult = await this.pumpFunSDK.createAndBuyBundled(
+        this.config.mainWallet,    // creator
+        mint,                      // mint
+        createTokenMetadata,       // metadata
+        buyAmountSol,             // creator's initial buy
+        bundledBuys,              // all other wallet buys
+        slippageBasisPoints,      // slippage
+        priorityFees,             // priority fees
+        'confirmed',              // commitment
+        'confirmed'               // finality
       );
       
       if (!createResult.success) {
-        throw new Error(`Token creation failed: ${createResult.error}`);
+        throw new Error(`Bundled transaction failed: ${createResult.error}`);
       }
       
-      logger.info(`✅ Token created successfully with working SDK!`);
+      logger.info(`✅ Bundled transaction successful!`);
       logger.info(`   Signature: ${createResult.signature}`);
       logger.info(`   Mint: ${mint.publicKey.toBase58()}`);
       logger.info(`   View on Pump.fun: https://pump.fun/${mint.publicKey.toBase58()}`);
       
-      // Step 5: Execute additional buys from other wallets
-      logger.info(`🛒 Executing ${this.wallets.length} additional buy transactions...`);
-      
-      let successfulBuys = 0;
-      for (let i = 0; i < this.wallets.length; i++) {
-        const wallet = this.wallets[i];
-        
-        try {
-          // Add randomization to buy amounts (±20%)
-          const variance = 0.8 + (Math.random() * 0.4); // 0.8 to 1.2
-          const buyAmountSolWithRandom = BigInt(Math.floor(Number(buyAmountSol) * variance));
-          
-          logger.info(`   Buy ${i + 1}/${this.wallets.length}: ${(Number(buyAmountSolWithRandom) / LAMPORTS_PER_SOL).toFixed(6)} SOL`);
-          
-          // Use the working SDK buy method
-          const buyResult = await this.pumpFunSDK.buy(
-            wallet,                  // buyer
-            mint.publicKey,         // mint
-            buyAmountSolWithRandom, // buyAmountSol
-            slippageBasisPoints,    // slippageBasisPoints
-            priorityFees,           // priorityFees
-            'confirmed',            // commitment
-            'confirmed'             // finality
-          );
-          
-          if (buyResult.success) {
-            logger.info(`   ✅ Buy ${i + 1} successful: ${buyResult.signature}`);
-            successfulBuys++;
-          } else {
-            logger.warn(`   ⚠️  Buy ${i + 1} failed: ${buyResult.error}`);
-          }
-          
-          // Small delay between transactions
-          if (i < this.wallets.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 1500));
-          }
-          
-        } catch (error) {
-          logger.warn(`   ❌ Buy ${i + 1} error: ${error}`);
-        }
-      }
-      
-      logger.info(`🎉 Operation completed with working SDK!`);
+      logger.info(`🎉 Operation completed with bundled SDK!`);
       logger.info(`   Token created: ✅`);
-      logger.info(`   Additional buys: ${successfulBuys}/${this.wallets.length} successful`);
+      logger.info(`   Creator buy: ✅`);
+      logger.info(`   Bundled buys: ${bundledBuys.length} wallets ✅`);
       
-      // Step 6: Cleanup
+      // Step 6: Cleanup (recover remaining SOL)
       await this.cleanup();
       
       return {

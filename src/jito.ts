@@ -532,33 +532,58 @@ import {
     };
   }
 
-  /**
-   * Check if Jito endpoints are available
-   */
-  export async function checkJitoEndpoints(): Promise<{ available: string[]; unavailable: string[] }> {
+/**
+ * Check if Jito endpoints are available - FIXED VERSION
+ */
+export async function checkJitoEndpoints(): Promise<{ available: string[]; unavailable: string[] }> {
     const available: string[] = [];
     const unavailable: string[] = [];
     
-    const checks = JITO_ENDPOINTS.map(async (endpoint) => {
+    console.log('🔍 Testing Jito endpoints...');
+    
+    const checks = JITO_ENDPOINTS.map(async (endpoint, index) => {
+      console.log(`Testing endpoint ${index + 1}: ${endpoint}`);
+      
       try {
-        const response = await axios.post(endpoint.replace('/bundles', ''), {
+        // ✅ FIXED: Use the full endpoint URL, don't remove /bundles
+        const response = await axios.post(endpoint, {
           jsonrpc: '2.0',
           id: 1,
           method: 'getInflightBundleStatuses',
-          params: [[]],
+          params: [[]], // Empty array is fine - we just want to test connectivity
         }, { timeout: 5000 });
         
-        if (response.status === 200) {
+        console.log(`Response from endpoint ${index + 1}:`, response.status);
+        
+        // ✅ FIXED: Any valid JSON-RPC response means the endpoint works
+        if (response.status === 200 && 
+            response.data && 
+            response.data.jsonrpc === '2.0') {
+          // Even if there's an "error" about empty bundle list, the endpoint is working
+          console.log(`✅ Endpoint ${index + 1} is available`);
           available.push(endpoint);
         } else {
+          console.log(`❌ Endpoint ${index + 1} unexpected response`);
           unavailable.push(endpoint);
         }
       } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.log(`❌ Endpoint ${index + 1} failed:`, errorMessage);
         unavailable.push(endpoint);
       }
     });
     
     await Promise.allSettled(checks);
+    
+    console.log(`📊 Jito endpoint check results:`);
+    console.log(`   Available: ${available.length}/${JITO_ENDPOINTS.length}`);
+    console.log(`   Unavailable: ${unavailable.length}/${JITO_ENDPOINTS.length}`);
+    
+    if (available.length > 0) {
+      console.log(`✅ Using ${available.length} available Jito endpoints`);
+    } else {
+      console.log(`❌ No Jito endpoints available - will fallback to individual transactions`);
+    }
     
     return { available, unavailable };
   }
