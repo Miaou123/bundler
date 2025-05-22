@@ -11,7 +11,7 @@
   },
   "include": [
     "src/**/*"
-  ],
+, "src/accounts"  ],
   "exclude": [
     "node_modules",
     "dist"

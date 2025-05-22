@@ -10,7 +10,7 @@ import {
     VersionedTransaction,
   } from "@solana/web3.js";
   import { Program, Provider, BN } from "@coral-xyz/anchor";
-  import { GlobalAccount } from "./accounts/globalAccount";
+  import { GlobalAccount } from "./accounts/globalAccountParser";
   import { BondingCurveAccount } from "./accounts/bondingCurveAccount";
   import {
     createAssociatedTokenAccountInstruction,
