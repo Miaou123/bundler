@@ -1,3 +1,5 @@
+// src/bundler.ts - Complete Working Bundler
+
 import {
   Connection,
   Keypair,
@@ -14,24 +16,15 @@ import {
   getAssociatedTokenAddress,
   getAccount,
 } from '@solana/spl-token';
-import { BN } from 'bn.js';
 import { BundlerConfig } from './config';
 import { logger } from './utils/logger';
-import {
-  createTokenInstruction,
-  buyTokenInstruction,
-  getGlobalPDA,
-  getBondingCurvePDA,
-  getMetadataPDA,
-  CreateTokenParams,
-  BuyTokenParams,
-  parseGlobalAccount,
-  parseBondingCurveAccount,
-} from './instructions';
 import { sendJitoBundle } from './jito';
 import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes';
 import fs from 'fs';
 import path from 'path';
+import { Program, AnchorProvider, BN } from '@coral-xyz/anchor';
+import NodeWallet from '@coral-xyz/anchor/dist/cjs/nodewallet';
+import { PumpFun, IDL } from './IDL';
 
 export interface TokenMetadata {
   name: string;
@@ -58,11 +51,15 @@ interface WalletBackup {
   createdAt: string;
 }
 
+// Constants from the verified IDL
+const PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
+const MPL_TOKEN_METADATA_PROGRAM_ID = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
+
 export class SecurePumpBundler {
   private connection: Connection;
   private config: BundlerConfig;
   private wallets: Keypair[] = [];
-  private globalData?: any;
+  private program: Program<PumpFun>;
   private walletBackupFile: string;
   private sessionId: string;
 
@@ -70,10 +67,15 @@ export class SecurePumpBundler {
     this.config = config;
     this.connection = new Connection(config.rpcUrl, 'confirmed');
     
-    // Create session ID for this bundler run
+    // Initialize Anchor Program with the official IDL
+    const wallet = new NodeWallet(config.mainWallet);
+    const provider = new AnchorProvider(this.connection, wallet, {
+      commitment: 'confirmed',
+    });
+    this.program = new Program<PumpFun>(IDL as PumpFun, provider);
+    
     this.sessionId = `bundler_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     
-    // Create wallets directory if it doesn't exist
     const walletsDir = path.join(process.cwd(), 'wallets');
     if (!fs.existsSync(walletsDir)) {
       fs.mkdirSync(walletsDir, { recursive: true });
@@ -96,7 +98,6 @@ export class SecurePumpBundler {
       const wallet = Keypair.generate();
       this.wallets.push(wallet);
       
-      // Save backup info
       walletBackups.push({
         address: wallet.publicKey.toBase58(),
         privateKey: bs58.encode(wallet.secretKey),
@@ -105,7 +106,6 @@ export class SecurePumpBundler {
       });
     }
     
-    // Save wallets to file immediately
     const backupData = {
       sessionId: this.sessionId,
       mainWallet: this.config.mainWallet.publicKey.toBase58(),
@@ -123,7 +123,6 @@ export class SecurePumpBundler {
       logger.info(`💾 Wallet backup saved: ${this.walletBackupFile}`);
       logger.info(`✅ Generated ${this.wallets.length} wallets successfully`);
       
-      // Log wallet addresses for reference
       walletBackups.forEach((wallet, index) => {
         logger.debug(`   Wallet ${index + 1}: ${wallet.address}`);
       });
@@ -153,21 +152,28 @@ export class SecurePumpBundler {
     }
   }
 
-  private async loadGlobalData(): Promise<void> {
-    const [globalPDA] = getGlobalPDA();
-    
-    try {
-      const accountInfo = await this.connection.getAccountInfo(globalPDA);
-      if (!accountInfo) {
-        throw new Error('Global account not found');
-      }
-      
-      this.globalData = parseGlobalAccount(accountInfo.data);
-      logger.info('✅ Global account data loaded');
-      
-    } catch (error) {
-      throw new Error(`Failed to load global account: ${error}`);
+  private async getGlobalAccount() {
+    const [globalAccountPDA] = PublicKey.findProgramAddressSync(
+      [Buffer.from("global")],
+      new PublicKey(PROGRAM_ID)
+    );
+
+    const accountInfo = await this.connection.getAccountInfo(globalAccountPDA);
+    if (!accountInfo) {
+      throw new Error('Global account not found');
     }
+
+    // Parse fee recipient from global account data
+    const feeRecipient = new PublicKey(accountInfo.data.slice(41, 73));
+    
+    return { globalAccountPDA, feeRecipient, accountInfo };
+  }
+
+  private getBondingCurvePDA(mint: PublicKey) {
+    return PublicKey.findProgramAddressSync(
+      [Buffer.from("bonding-curve"), mint.toBuffer()],
+      new PublicKey(PROGRAM_ID)
+    )[0];
   }
 
   private async checkAndDistributeSOL(): Promise<void> {
@@ -175,7 +181,7 @@ export class SecurePumpBundler {
     const balanceSOL = mainBalance / LAMPORTS_PER_SOL;
     
     const solPerWallet = this.config.swapAmountSol + 0.005; // Extra for fees
-    const totalNeeded = (this.config.walletCount * solPerWallet) + 0.02; // +0.02 for main wallet fees
+    const totalNeeded = (this.config.walletCount * solPerWallet) + 0.02;
     
     logger.info(`💰 Main wallet balance: ${balanceSOL.toFixed(6)} SOL`);
     logger.info(`💰 Total needed: ${totalNeeded.toFixed(6)} SOL`);
@@ -184,13 +190,11 @@ export class SecurePumpBundler {
       throw new Error(`Insufficient balance. Need ${totalNeeded.toFixed(6)} SOL, have ${balanceSOL.toFixed(6)} SOL`);
     }
 
-    // Distribute SOL to wallets
     logger.info('💸 Distributing SOL to wallets...');
     this.updateBackupStatus('distributing_sol');
     
     const tx = new Transaction();
     
-    // Add priority fees
     tx.add(
       ComputeBudgetProgram.setComputeUnitLimit({ 
         units: this.config.priorityFee.unitLimit 
@@ -200,7 +204,6 @@ export class SecurePumpBundler {
       })
     );
 
-    // Add transfers
     for (const wallet of this.wallets) {
       tx.add(
         SystemProgram.transfer({
@@ -222,7 +225,6 @@ export class SecurePumpBundler {
     logger.info('📤 Uploading metadata to IPFS...');
     this.updateBackupStatus('uploading_metadata');
     
-    // Read and validate image file
     if (!fs.existsSync(metadata.imagePath)) {
       throw new Error(`Image file not found: ${metadata.imagePath}`);
     }
@@ -270,41 +272,41 @@ export class SecurePumpBundler {
     }
   }
 
-  private async createToken(metadata: TokenMetadata, metadataUri: string): Promise<{ mint: Keypair; transaction: VersionedTransaction }> {
+  private async createTokenTransaction(metadata: TokenMetadata, metadataUri: string): Promise<{ mint: Keypair; transaction: VersionedTransaction }> {
     const mint = Keypair.generate();
     
     logger.info(`🪙 Creating token with mint: ${mint.publicKey.toBase58()}`);
     this.updateBackupStatus('creating_token', { mintAddress: mint.publicKey.toBase58() });
     
-    // Get required PDAs
-    const [global] = getGlobalPDA();
-    const [mintAuthority] = require('./instructions').getMintAuthorityPDA();
-    const [bondingCurve] = getBondingCurvePDA(mint.publicKey);
-    const [metadataPDA] = getMetadataPDA(mint.publicKey);
-    
+    // Get required PDAs using the official program methods
+    const [metadataPDA] = PublicKey.findProgramAddressSync(
+      [
+        Buffer.from("metadata"),
+        new PublicKey(MPL_TOKEN_METADATA_PROGRAM_ID).toBuffer(),
+        mint.publicKey.toBuffer(),
+      ],
+      new PublicKey(MPL_TOKEN_METADATA_PROGRAM_ID)
+    );
+
+    const bondingCurve = this.getBondingCurvePDA(mint.publicKey);
     const associatedBondingCurve = await getAssociatedTokenAddress(
       mint.publicKey,
       bondingCurve,
       true
     );
 
-    const createParams: CreateTokenParams = {
-      name: metadata.name,
-      symbol: metadata.symbol,
-      uri: metadataUri,
-    };
+    // Use the Anchor program's methods directly with the official IDL
+    const createInstruction = await this.program.methods
+      .create(metadata.name, metadata.symbol, metadataUri)
+      .accounts({
+        mint: mint.publicKey,
+        associatedBondingCurve: associatedBondingCurve,
+        metadata: metadataPDA,
+        user: this.config.mainWallet.publicKey,
+      })
+      .instruction();
 
-    const createIx = createTokenInstruction(createParams, {
-      mint: mint.publicKey,
-      mintAuthority,
-      bondingCurve,
-      associatedBondingCurve,
-      global,
-      metadata: metadataPDA,
-      user: this.config.mainWallet.publicKey,
-    });
-
-    // Build transaction
+    // Build transaction with priority fees
     const tx = new Transaction();
     
     tx.add(
@@ -316,7 +318,7 @@ export class SecurePumpBundler {
       })
     );
     
-    tx.add(createIx);
+    tx.add(createInstruction);
 
     // Create versioned transaction
     const { blockhash } = await this.connection.getLatestBlockhash();
@@ -340,10 +342,12 @@ export class SecurePumpBundler {
     const buyTxs: VersionedTransaction[] = [];
     const { blockhash } = await this.connection.getLatestBlockhash();
     
+    // Get global account info for fee recipient
+    const { feeRecipient } = await this.getGlobalAccount();
+    
     for (let i = 0; i < this.wallets.length; i++) {
       const wallet = this.wallets[i];
       
-      // Calculate buy amount with optional randomization
       let buyAmountSOL = this.config.swapAmountSol;
       if (this.config.randomizeBuyAmounts) {
         const variance = 0.1 + (Math.random() * 0.2); // 10-30% variance
@@ -353,19 +357,15 @@ export class SecurePumpBundler {
       const solAmount = new BN(Math.floor(buyAmountSOL * LAMPORTS_PER_SOL));
       const maxSolCost = solAmount.muln(1 + this.config.slippageBasisPoints / 10000);
       
-      // Simplified token amount calculation - in production you'd query the bonding curve
-      const tokenAmount = solAmount.muln(1000000); // This needs proper calculation
+      // Calculate token amount (simplified - for production, query bonding curve)
+      const tokenAmount = solAmount.muln(1000000);
 
-      // Get required accounts
-      const [global] = getGlobalPDA();
-      const [bondingCurve] = getBondingCurvePDA(mint);
-      
+      const bondingCurve = this.getBondingCurvePDA(mint);
       const associatedBondingCurve = await getAssociatedTokenAddress(mint, bondingCurve, true);
       const associatedUser = await getAssociatedTokenAddress(mint, wallet.publicKey, false);
 
       const tx = new Transaction();
       
-      // Add priority fees
       tx.add(
         ComputeBudgetProgram.setComputeUnitLimit({ 
           units: this.config.priorityFee.unitLimit 
@@ -389,22 +389,19 @@ export class SecurePumpBundler {
         );
       }
 
-      const buyParams: BuyTokenParams = {
-        amount: tokenAmount,
-        maxSolCost: maxSolCost,
-      };
+      // Use Anchor program method for buy instruction with official IDL
+      const buyInstruction = await this.program.methods
+        .buy(tokenAmount, maxSolCost)
+        .accounts({
+          feeRecipient: feeRecipient,
+          mint: mint,
+          associatedBondingCurve: associatedBondingCurve,
+          associatedUser: associatedUser,
+          user: wallet.publicKey,
+        })
+        .instruction();
 
-      const buyIx = buyTokenInstruction(buyParams, {
-        global,
-        feeRecipient: this.globalData?.feeRecipient || global,
-        mint,
-        bondingCurve,
-        associatedBondingCurve,
-        associatedUser,
-        user: wallet.publicKey,
-      });
-
-      tx.add(buyIx);
+      tx.add(buyInstruction);
 
       // Create versioned transaction
       const versionedTx = new VersionedTransaction(
@@ -424,164 +421,153 @@ export class SecurePumpBundler {
     return buyTxs;
   }
 
-  /**
- * Simulates transactions before sending them to catch issues early
- */
-private async simulateTransactions(transactions: VersionedTransaction[]): Promise<{ success: boolean; errors: string[] }> {
-  logger.info('🧪 Simulating transactions before bundle submission...');
-  
-  const errors: string[] = [];
-  
-  for (let i = 0; i < transactions.length; i++) {
-    try {
-      logger.debug(`   Simulating transaction ${i + 1}/${transactions.length}...`);
-      
-      const simulation = await this.connection.simulateTransaction(transactions[i], {
-        sigVerify: false, // Skip signature verification for simulation
-        commitment: 'processed',
-      });
-      
-      if (simulation.value.err) {
-        const errorMsg = `Transaction ${i + 1} simulation failed: ${JSON.stringify(simulation.value.err)}`;
+  private async simulateTransactions(transactions: VersionedTransaction[]): Promise<{ success: boolean; errors: string[] }> {
+    logger.info('🧪 Simulating transactions before bundle submission...');
+    
+    const errors: string[] = [];
+    
+    for (let i = 0; i < transactions.length; i++) {
+      try {
+        logger.debug(`   Simulating transaction ${i + 1}/${transactions.length}...`);
+        
+        const simulation = await this.connection.simulateTransaction(transactions[i], {
+          sigVerify: false,
+          commitment: 'processed',
+        });
+        
+        if (simulation.value.err) {
+          const errorMsg = `Transaction ${i + 1} simulation failed: ${JSON.stringify(simulation.value.err)}`;
+          errors.push(errorMsg);
+          logger.error(`❌ ${errorMsg}`);
+          
+          if (simulation.value.logs) {
+            logger.error(`   Logs:`, simulation.value.logs);
+          }
+        } else {
+          logger.debug(`   ✅ Transaction ${i + 1} simulation successful`);
+          logger.debug(`      Compute units used: ${simulation.value.unitsConsumed}`);
+        }
+        
+      } catch (error) {
+        const errorMsg = `Transaction ${i + 1} simulation error: ${error}`;
         errors.push(errorMsg);
         logger.error(`❌ ${errorMsg}`);
-        
-        // Log more details about the failed transaction
-        if (simulation.value.logs) {
-          logger.error(`   Logs:`, simulation.value.logs);
-        }
+      }
+    }
+    
+    if (errors.length === 0) {
+      logger.info('✅ All transaction simulations passed!');
+    } else {
+      logger.error(`❌ ${errors.length}/${transactions.length} transaction simulations failed`);
+    }
+    
+    return {
+      success: errors.length === 0,
+      errors,
+    };
+  }
+
+  async testInstructions(): Promise<{ success: boolean; errors: string[] }> {
+    logger.info('🧪 TESTING MODE: Validating official Anchor program instructions...');
+    
+    const errors: string[] = [];
+    
+    try {
+      // Test 1: Global account access
+      logger.info('   Testing global account access...');
+      await this.getGlobalAccount();
+      logger.info('   ✅ Global account accessible');
+      
+      // Test 2: Test instruction building (without signatures)
+      logger.info('   Testing instruction creation...');
+      const testMint = Keypair.generate();
+      
+      // Test create instruction using official IDL
+      const [metadataPDA] = PublicKey.findProgramAddressSync(
+        [
+          Buffer.from("metadata"),
+          new PublicKey(MPL_TOKEN_METADATA_PROGRAM_ID).toBuffer(),
+          testMint.publicKey.toBuffer(),
+        ],
+        new PublicKey(MPL_TOKEN_METADATA_PROGRAM_ID)
+      );
+
+      const bondingCurve = this.getBondingCurvePDA(testMint.publicKey);
+      const associatedBondingCurve = await getAssociatedTokenAddress(
+        testMint.publicKey,
+        bondingCurve,
+        true
+      );
+
+      const createIx = await this.program.methods
+        .create('TEST', 'TST', 'https://test.com/metadata.json')
+        .accounts({
+          mint: testMint.publicKey,
+          associatedBondingCurve: associatedBondingCurve,
+          metadata: metadataPDA,
+          user: this.config.mainWallet.publicKey,
+        })
+        .instruction();
+      
+      logger.info('   ✅ Create instruction built successfully');
+      
+      // Test buy instruction using official IDL
+      const { feeRecipient } = await this.getGlobalAccount();
+      
+      const testWallet = Keypair.generate();
+      const associatedUser = await getAssociatedTokenAddress(testMint.publicKey, testWallet.publicKey, false);
+      
+      const buyIx = await this.program.methods
+        .buy(new BN(1000), new BN(100000))
+        .accounts({
+          feeRecipient: feeRecipient,
+          mint: testMint.publicKey,
+          associatedBondingCurve: associatedBondingCurve,
+          associatedUser: associatedUser,
+          user: testWallet.publicKey,
+        })
+        .instruction();
+      
+      logger.info('   ✅ Buy instruction built successfully');
+      
+      // Test transaction building
+      logger.info('   Testing transaction construction...');
+      
+      const testTx = new Transaction();
+      testTx.add(createIx);
+      
+      const { blockhash } = await this.connection.getLatestBlockhash();
+      const versionedTx = new VersionedTransaction(
+        new TransactionMessage({
+          payerKey: this.config.mainWallet.publicKey,
+          recentBlockhash: blockhash,
+          instructions: testTx.instructions,
+        }).compileToV0Message()
+      );
+      
+      logger.info('   ✅ Transaction construction successful');
+      
+      // Test transaction size validation
+      const serialized = versionedTx.serialize();
+      if (serialized.length > 1232) {
+        errors.push(`Transaction too large: ${serialized.length} bytes (max 1232)`);
       } else {
-        logger.debug(`   ✅ Transaction ${i + 1} simulation successful`);
-        logger.debug(`      Compute units used: ${simulation.value.unitsConsumed}`);
-        
-        if (simulation.value.logs && simulation.value.logs.length > 0) {
-          logger.debug(`      Last log: ${simulation.value.logs[simulation.value.logs.length - 1]}`);
-        }
+        logger.info(`   ✅ Transaction size OK: ${serialized.length} bytes`);
       }
       
+      logger.info('🎉 All official IDL instruction tests passed!');
+      
     } catch (error) {
-      const errorMsg = `Transaction ${i + 1} simulation error: ${error}`;
+      const errorMsg = `Official IDL instruction test failed: ${error}`;
       errors.push(errorMsg);
       logger.error(`❌ ${errorMsg}`);
     }
-  }
-  
-  if (errors.length === 0) {
-    logger.info('✅ All transaction simulations passed!');
-  } else {
-    logger.error(`❌ ${errors.length}/${transactions.length} transaction simulations failed`);
-  }
-  
-  return {
-    success: errors.length === 0,
-    errors,
-  };
-}
-
-async testInstructions(): Promise<{ success: boolean; errors: string[] }> {
-  logger.info('🧪 TESTING MODE: Validating instructions without spending SOL...');
-  
-  const errors: string[] = [];
-  
-  try {
-    // Test 1: Global account access
-    logger.info('   Testing global account access...');
-    await this.loadGlobalData();
-    logger.info('   ✅ Global account accessible');
     
-    // Test 2: Instruction building (without signatures)
-    logger.info('   Testing instruction creation...');
-    const testMint = Keypair.generate();
-    
-    const [global] = getGlobalPDA();
-    const [mintAuthority] = require('./instructions').getMintAuthorityPDA();
-    const [bondingCurve] = getBondingCurvePDA(testMint.publicKey);
-    const [metadataPDA] = getMetadataPDA(testMint.publicKey);
-    
-    // Test create instruction
-    const createParams: CreateTokenParams = {
-      name: 'TEST',
-      symbol: 'TST',
-      uri: 'https://test.com/metadata.json',
+    return {
+      success: errors.length === 0,
+      errors,
     };
-    
-    const associatedBondingCurve = await getAssociatedTokenAddress(
-      testMint.publicKey,
-      bondingCurve,
-      true
-    );
-    
-    const createIx = createTokenInstruction(createParams, {
-      mint: testMint.publicKey,
-      mintAuthority,
-      bondingCurve,
-      associatedBondingCurve,
-      global,
-      metadata: metadataPDA,
-      user: this.config.mainWallet.publicKey,
-    });
-    
-    logger.info('   ✅ Create instruction built successfully');
-    
-    // Test buy instruction
-    const buyParams: BuyTokenParams = {
-      amount: new BN(1000),
-      maxSolCost: new BN(100000),
-    };
-    
-    const testWallet = Keypair.generate();
-    const associatedUser = await getAssociatedTokenAddress(testMint.publicKey, testWallet.publicKey, false);
-    
-    const buyIx = buyTokenInstruction(buyParams, {
-      global,
-      feeRecipient: this.globalData?.feeRecipient || global,
-      mint: testMint.publicKey,
-      bondingCurve,
-      associatedBondingCurve,
-      associatedUser,
-      user: testWallet.publicKey,
-    });
-    
-    logger.info('   ✅ Buy instruction built successfully');
-    
-    // Test transaction building
-    logger.info('   Testing transaction construction...');
-    
-    const testTx = new Transaction();
-    testTx.add(createIx);
-    
-    const { blockhash } = await this.connection.getLatestBlockhash();
-    const versionedTx = new VersionedTransaction(
-      new TransactionMessage({
-        payerKey: this.config.mainWallet.publicKey,
-        recentBlockhash: blockhash,
-        instructions: testTx.instructions,
-      }).compileToV0Message()
-    );
-    
-    logger.info('   ✅ Transaction construction successful');
-    
-    // Test transaction size validation
-    const serialized = versionedTx.serialize();
-    if (serialized.length > 1232) {
-      errors.push(`Transaction too large: ${serialized.length} bytes (max 1232)`);
-    } else {
-      logger.info(`   ✅ Transaction size OK: ${serialized.length} bytes`);
-    }
-    
-    logger.info('🎉 All instruction tests passed!');
-    
-  } catch (error) {
-    const errorMsg = `Instruction test failed: ${error}`;
-    errors.push(errorMsg);
-    logger.error(`❌ ${errorMsg}`);
   }
-  
-  return {
-    success: errors.length === 0,
-    errors,
-  };
-}
 
   async cleanup(): Promise<void> {
     logger.info('🧹 Starting automatic wallet cleanup...');
@@ -590,14 +576,15 @@ async testInstructions(): Promise<{ success: boolean; errors: string[] }> {
     let totalRecovered = 0;
     let successCount = 0;
     
-    const cleanupPromises = this.wallets.map(async (wallet, index) => {
+    for (let i = 0; i < this.wallets.length; i++) {
+      const wallet = this.wallets[i];
       try {
         const balance = await this.connection.getBalance(wallet.publicKey);
         const balanceSOL = balance / LAMPORTS_PER_SOL;
         
-        logger.debug(`   Wallet ${index + 1}: ${balanceSOL.toFixed(6)} SOL`);
+        logger.debug(`   Wallet ${i + 1}: ${balanceSOL.toFixed(6)} SOL`);
         
-        if (balance > 5000) { // Keep some for rent exemption
+        if (balance > 5000) {
           const recoverAmount = balance - 5000;
           
           const tx = new Transaction().add(
@@ -618,23 +605,16 @@ async testInstructions(): Promise<{ success: boolean; errors: string[] }> {
           totalRecovered += recoverAmount;
           successCount++;
           
-          logger.debug(`   ✅ Recovered ${(recoverAmount / LAMPORTS_PER_SOL).toFixed(6)} SOL from wallet ${index + 1}`);
-          return { success: true, amount: recoverAmount, signature };
+          logger.debug(`   ✅ Recovered ${(recoverAmount / LAMPORTS_PER_SOL).toFixed(6)} SOL from wallet ${i + 1}`);
         }
-        
-        return { success: true, amount: 0, signature: null };
       } catch (error) {
-        logger.warn(`   ⚠️  Failed to cleanup wallet ${index + 1}: ${error}`);
-        return { success: false, error: error instanceof Error ? error.message : String(error) };
+        logger.warn(`   ⚠️  Failed to cleanup wallet ${i + 1}: ${error}`);
       }
-    });
-    
-    const results = await Promise.allSettled(cleanupPromises);
+    }
     
     logger.info(`✅ Cleanup completed: ${successCount}/${this.wallets.length} wallets processed`);
     logger.info(`💰 Total recovered: ${(totalRecovered / LAMPORTS_PER_SOL).toFixed(6)} SOL`);
     
-    // Update backup with cleanup results
     this.updateBackupStatus('cleaned_up', {
       cleanupResults: {
         walletsProcessed: this.wallets.length,
@@ -645,7 +625,6 @@ async testInstructions(): Promise<{ success: boolean; errors: string[] }> {
       }
     });
     
-    // Archive the backup file
     try {
       const archiveDir = path.join(process.cwd(), 'wallets', 'archive');
       if (!fs.existsSync(archiveDir)) {
@@ -661,21 +640,20 @@ async testInstructions(): Promise<{ success: boolean; errors: string[] }> {
   }
 
   async createAndBundle(metadata: TokenMetadata, testMode: boolean = false): Promise<BundleResult> {
-    // Check for test mode first
     if (testMode) {
       logger.info('🧪 RUNNING IN TEST MODE - No SOL will be spent');
       
       const testResult = await this.testInstructions();
       
       if (testResult.success) {
-        logger.info('✅ TEST MODE: All instructions valid - ready for real run!');
+        logger.info('✅ TEST MODE: All official IDL instructions valid - ready for real run!');
         return {
           success: true,
           mint: 'TEST_MODE_NO_MINT',
           signature: 'TEST_MODE_NO_SIGNATURE',
         };
       } else {
-        logger.error('❌ TEST MODE: Instruction validation failed');
+        logger.error('❌ TEST MODE: Official IDL instruction validation failed');
         return {
           success: false,
           error: `Test failed: ${testResult.errors.join('; ')}`,
@@ -687,33 +665,28 @@ async testInstructions(): Promise<{ success: boolean; errors: string[] }> {
       logger.info('🚀 Starting token creation and bundling...');
       this.updateBackupStatus('starting_bundle');
       
-      // Step 1: Load global data
-      await this.loadGlobalData();
-      
-      // Step 2: Distribute SOL
+      // Step 1: Distribute SOL
       await this.checkAndDistributeSOL();
       
-      // Step 3: Upload metadata
+      // Step 2: Upload metadata
       const metadataUri = await this.uploadMetadata(metadata);
       
-      // Step 4: Create token
-      const { mint, transaction: createTx } = await this.createToken(metadata, metadataUri);
+      // Step 3: Create token transaction using official IDL
+      const { mint, transaction: createTx } = await this.createTokenTransaction(metadata, metadataUri);
       
-      // Step 5: Create buy transactions
+      // Step 4: Create buy transactions using official IDL
       const buyTxs = await this.createBuyTransactions(mint.publicKey);
       
-      // Step 6: Simulate transactions before sending
+      // Step 5: Simulate all transactions
       const allTxs = [createTx, ...buyTxs];
       logger.info(`📦 Preparing bundle with ${allTxs.length} transactions...`);
-  
-      // NEW: Simulate before sending
+      
       const simulationResult = await this.simulateTransactions(allTxs);
       if (!simulationResult.success) {
         this.updateBackupStatus('simulation_failed', { 
           errors: simulationResult.errors 
         });
         
-        // Still try cleanup even if simulation fails
         await this.cleanup();
         
         return {
@@ -721,7 +694,8 @@ async testInstructions(): Promise<{ success: boolean; errors: string[] }> {
           error: `Transaction simulation failed: ${simulationResult.errors.join('; ')}`,
         };
       }
-  
+      
+      // Step 6: Submit bundle via Jito
       logger.info(`📦 All simulations passed! Sending bundle via Jito...`);
       this.updateBackupStatus('submitting_bundle', { transactionCount: allTxs.length });
       
@@ -734,7 +708,6 @@ async testInstructions(): Promise<{ success: boolean; errors: string[] }> {
           mintAddress: mint.publicKey.toBase58()
         });
         
-        // Clean up wallets after success
         await this.cleanup();
         
         return {
@@ -750,7 +723,6 @@ async testInstructions(): Promise<{ success: boolean; errors: string[] }> {
           mintAddress: mint.publicKey.toBase58()
         });
         
-        // Clean up wallets after failure
         await this.cleanup();
         
         return {
@@ -765,14 +737,10 @@ async testInstructions(): Promise<{ success: boolean; errors: string[] }> {
         error: error instanceof Error ? error.message : 'Unknown error'
       });
       
-      // Always cleanup on error
       try {
         await this.cleanup();
       } catch (cleanupError) {
         logger.warn('⚠️  Cleanup failed:', cleanupError);
-        this.updateBackupStatus('cleanup_failed', { 
-          cleanupError: cleanupError instanceof Error ? cleanupError.message : 'Unknown cleanup error'
-        });
       }
       
       return {
