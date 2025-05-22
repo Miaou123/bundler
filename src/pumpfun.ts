@@ -244,11 +244,11 @@ export class PumpFunSDK {
       this.getBondingCurvePDA(mint),
       true
     );
-
+  
     const associatedUser = await getAssociatedTokenAddress(mint, buyer, false);
-
+  
     let transaction = new Transaction();
-
+  
     try {
       await getAccount(this.connection, associatedUser, commitment);
     } catch (e) {
@@ -261,7 +261,9 @@ export class PumpFunSDK {
         )
       );
     }
-
+  
+    // Use the EXACT same approach as the working SDK
+    // Note: global and bondingCurve are PDAs that Anchor resolves automatically
     transaction.add(
       await this.program.methods
         .buy(new BN(amount.toString()), new BN(solAmount.toString()))
@@ -274,7 +276,7 @@ export class PumpFunSDK {
         })
         .transaction()
     );
-
+  
     return transaction;
   }
 
