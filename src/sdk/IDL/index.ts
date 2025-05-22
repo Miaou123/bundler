@@ -1,2 +1,2 @@
-export { default as IDL } from "./pump-fun.json";
-export type { PumpFun } from "./pump-fun.ts";
+export { default as IDL } from "./pump.json";
+export type { PumpFun } from "./pump.ts";
