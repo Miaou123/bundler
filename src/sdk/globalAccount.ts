@@ -1,4 +1,4 @@
-// src/accounts/globalAccount.ts - Global account data parser
+// src/sdk/globalAccount.ts - From the working GitHub repo
 
 import { PublicKey } from "@solana/web3.js";
 import { struct, bool, u64, publicKey, Layout } from "@coral-xyz/borsh";

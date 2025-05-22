@@ -1,4 +1,4 @@
-// src/accounts/bondingCurveAccount.ts - Bonding curve account data parser
+// src/sdk/bondingCurveAccount.ts - From the working GitHub repo
 
 import { struct, bool, u64, Layout } from "@coral-xyz/borsh";
 
@@ -102,7 +102,7 @@ export class BondingCurveAccount {
 
   getBuyOutPrice(amount: bigint, feeBasisPoints: bigint): bigint {
     let solTokens =
-      amount < this.realSolReserves ? this.realSolReserves : amount;
+      amount < this.virtualTokenReserves ? this.virtualTokenReserves : amount;
     let totalSellValue =
       (solTokens * this.virtualSolReserves) /
         (this.virtualTokenReserves - solTokens) +

@@ -1,7 +1,7 @@
 import { config } from 'dotenv';
 import fs from 'fs';
 import path from 'path';
-// Remove inquirer import - we'll use readline instead
+// Use the corrected bundler
 import { SecurePumpBundler } from './bundler';
 import { loadConfig, validateEnvironment } from './config';
 import { logger } from './utils/logger';
@@ -62,13 +62,25 @@ async function getTokenMetadata(): Promise<TokenMetadata> {
   // Check if image file exists
   if (!fs.existsSync(metadata.imagePath)) {
     logger.warn(`⚠️  Token image not found at ${metadata.imagePath}`);
-    logger.warn('   Please add your token image to assets/token-image.png');
     
-    // Create a placeholder if needed
-    const placeholderPath = path.join(process.cwd(), 'assets', 'placeholder.txt');
-    if (!fs.existsSync(placeholderPath)) {
-      fs.writeFileSync(placeholderPath, 'Placeholder for token image');
+    // Create a simple placeholder image
+    const assetsDir = path.dirname(metadata.imagePath);
+    if (!fs.existsSync(assetsDir)) {
+      fs.mkdirSync(assetsDir, { recursive: true });
     }
+    
+    // Create a minimal PNG file (1x1 pixel transparent PNG)
+    const minimalPNG = Buffer.from([
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+      0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+      0x0B, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+      0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+      0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
+    ]);
+    
+    fs.writeFileSync(metadata.imagePath, minimalPNG);
+    logger.info(`📷 Created placeholder image at ${metadata.imagePath}`);
   }
 
   return metadata;
@@ -129,22 +141,24 @@ async function main() {
     logger.info(`   Generated wallets: ${walletInfo.walletCount}`);
     
     if (isDryRun) {
-      logger.info('\n🧪 DRY RUN - Simulating operations...');
-      logger.info('✅ All validations passed');
-      logger.info('✅ Configuration is valid');
-      logger.info('✅ Token metadata is ready');
-      logger.info('✅ Bundler is properly initialized');
-      logger.info('\n🎯 To run for real, remove DRY_RUN=true from .env or don\'t use --dry-run flag');
+      logger.info('\n🧪 DRY RUN - Testing SDK...');
+      const result = await bundler.createAndBundle(tokenMetadata, true);
+      
+      if (result.success) {
+        logger.info('✅ All validations passed - ready to run!');
+      } else {
+        logger.error(`❌ Validation failed: ${result.error}`);
+        process.exit(1);
+      }
       return;
     }
     
-    // Create and bundle token
-    logger.info('\n🚀 Starting token creation and bundling...');
-    const testMode = process.env.TEST_MODE === 'true';
-    const result = await bundler.createAndBundle(tokenMetadata, testMode);
+    // Create token and execute buys
+    logger.info('\n🚀 Starting token creation and buying...');
+    const result = await bundler.createAndBundle(tokenMetadata, false);
     
     if (result.success) {
-      logger.info('\n🎉 SUCCESS! Token created and bundled successfully!');
+      logger.info('\n🎉 SUCCESS! Token created and buys executed successfully!');
       logger.info(`📝 Token Address: ${result.mint}`);
       logger.info(`🔗 Pump.fun URL: https://pump.fun/${result.mint}`);
       logger.info(`🔗 Solscan URL: https://solscan.io/token/${result.mint}`);
@@ -155,6 +169,7 @@ async function main() {
         timestamp: new Date().toISOString(),
         success: true,
         tokenAddress: result.mint,
+        signature: result.signature,
         tokenMetadata,
         bundlerConfig: {
           walletCount: bundlerConfig.walletCount,
@@ -165,13 +180,8 @@ async function main() {
       logger.info(`💾 Results saved to: ${resultsPath}`);
       
     } else {
-      logger.error('\n💥 FAILED to create and bundle token');
-      logger.error('📋 Check the logs above for error details');
-      logger.error('💡 Common issues:');
-      logger.error('   - Insufficient SOL balance');
-      logger.error('   - Network congestion (try increasing priority fees)');
-      logger.error('   - RPC rate limits (use a paid RPC service)');
-      logger.error('   - Invalid token metadata or image');
+      logger.error('\n💥 FAILED to create and buy token');
+      logger.error(`Error: ${result.error}`);
       
       process.exit(1);
     }
@@ -185,12 +195,6 @@ async function main() {
         logger.error(`Stack trace: ${error.stack}`);
       }
     }
-    
-    logger.error('\n🔧 Troubleshooting tips:');
-    logger.error('1. Check your .env configuration');
-    logger.error('2. Ensure your wallet has sufficient SOL');
-    logger.error('3. Verify your RPC endpoint is working');
-    logger.error('4. Try running with DEBUG_MODE=true for more details');
     
     process.exit(1);
   }
