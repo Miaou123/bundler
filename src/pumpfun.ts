@@ -1,4 +1,4 @@
-// src/pumpfun.ts - Fixed version that works with your existing structure
+// src/pumpfun.ts - Fixed version for dual wallet system
 
 import {
   Commitment,
@@ -43,8 +43,8 @@ import {
   calculateWithSlippageSell,
   sendTx,
 } from "./sdk/util";
-import { Pump, IDL } from "./sdk/IDL/index"; // Use your existing import structure
-import type { BundlerConfig } from "./config"; // Import the type
+import { Pump, IDL } from "./sdk/IDL/index";
+import type { BundlerConfig } from "./config";
 
 const PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 const MPL_TOKEN_METADATA_PROGRAM_ID =
@@ -126,7 +126,7 @@ export class PumpFunSDK {
     return createResults;
   }
 
-  // NEW: Bundled create and buy method using Jito bundles
+  // FIXED: Bundled create and buy method using Jito bundles with proper dual wallet support
   async createAndBuyBundled(
     creator: Keypair,
     mint: Keypair,
@@ -268,15 +268,17 @@ export class PumpFunSDK {
 
     console.log(`🎯 Built ${versionedTransactions.length} versioned transactions for Jito bundle`);
 
-    // 4. FIXED: Import and use the ENHANCED Jito bundling system with detailed logging
+    // 4. FIXED: Import and use the ENHANCED Jito bundling system with proper config
     const { sendSmartJitoBundle } = await import('./jito');
     
-    // Create a minimal config object for Jito (using your BundlerConfig structure)
-    // We'll create a partial config with only the fields needed by Jito functions
+    // FIXED: Create proper config object for Jito with dual wallet support
     const jitoConfig: BundlerConfig = {
       rpcUrl: this.connection.rpcEndpoint,
       network: 'mainnet-beta',
-      mainWallet: creator,
+      // FIXED: Dual wallet setup
+      creatorWallet: creator,
+      distributorWallet: creator, // In bundled context, use creator as fallback
+      mainWallet: creator, // Backward compatibility
       walletCount: additionalBuys.length,
       swapAmountSol: Number(creatorBuyAmountSol) / 1e9,
       randomizeBuyAmounts: false,
@@ -308,7 +310,7 @@ export class PumpFunSDK {
     console.log(`🚀 Sending Jito bundle with enhanced debugging and verification...`);
     const jitoResult = await sendSmartJitoBundle(
       versionedTransactions,
-      creator, // Payer
+      creator, // FIXED: Payer is the creator wallet
       jitoConfig,
       mint.publicKey.toBase58() // Pass expected mint for verification
     );
@@ -690,7 +692,7 @@ export class PumpFunSDK {
   
     const associatedUser = await getAssociatedTokenAddress(mint, buyer, false);
 
-    // For bundled transactions, we know the creator is the main wallet
+    // FIXED: For bundled transactions, we use the creator from the provider
     const creator = this.program.provider.publicKey!;
     const [creatorVaultPDA] = PublicKey.findProgramAddressSync(
       [Buffer.from("creator-vault"), creator.toBuffer()],

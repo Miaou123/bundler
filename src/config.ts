@@ -1,3 +1,5 @@
+// src/config.ts - Modified to support two wallets
+
 import { Keypair } from '@solana/web3.js';
 import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes';
 import { logger } from './utils/logger';
@@ -8,7 +10,11 @@ export interface BundlerConfig {
   rpcWebsocketUrl?: string;
   network: string;
   
-  // Wallet configuration
+  // Wallet configuration - NOW WITH TWO WALLETS
+  creatorWallet: Keypair;      // Wallet for token creation and initial buy
+  distributorWallet: Keypair;  // Wallet for funding bundled buy wallets
+  
+  // BACKWARD COMPATIBILITY: Keep mainWallet as an alias to creatorWallet
   mainWallet: Keypair;
   
   // Bundler settings
@@ -50,7 +56,8 @@ export interface BundlerConfig {
 export function validateEnvironment(): void {
   const required = [
     'RPC_URL',
-    'MAIN_WALLET_PRIVATE_KEY'
+    'CREATOR_WALLET_PRIVATE_KEY',     // New env var for creator
+    'DISTRIBUTOR_WALLET_PRIVATE_KEY'  // New env var for distributor
   ];
   
   const missing = required.filter(env => !process.env[env]);
@@ -85,12 +92,8 @@ export function validateEnvironment(): void {
   logger.info('✅ Environment validation passed');
 }
 
-export function loadConfig(): BundlerConfig {
-  // Load and validate private key
-  let mainWallet: Keypair;
+function parsePrivateKey(privateKeyString: string, walletType: string): Keypair {
   try {
-    const privateKeyString = process.env.MAIN_WALLET_PRIVATE_KEY!;
-    
     // Support both base58 and array formats
     let secretKey: Uint8Array;
     if (privateKeyString.startsWith('[')) {
@@ -107,11 +110,30 @@ export function loadConfig(): BundlerConfig {
       throw new Error(`Invalid private key length: ${secretKey.length} (expected 64)`);
     }
     
-    mainWallet = Keypair.fromSecretKey(secretKey);
-    logger.info(`✅ Main wallet loaded: ${mainWallet.publicKey.toBase58()}`);
+    const keypair = Keypair.fromSecretKey(secretKey);
+    logger.info(`✅ ${walletType} wallet loaded: ${keypair.publicKey.toBase58()}`);
+    return keypair;
     
   } catch (error) {
-    throw new Error(`Invalid private key format: ${error}`);
+    throw new Error(`Invalid ${walletType} private key format: ${error}`);
+  }
+}
+
+export function loadConfig(): BundlerConfig {
+  // Load and validate both private keys
+  const creatorWallet = parsePrivateKey(
+    process.env.CREATOR_WALLET_PRIVATE_KEY!, 
+    'Creator'
+  );
+  
+  const distributorWallet = parsePrivateKey(
+    process.env.DISTRIBUTOR_WALLET_PRIVATE_KEY!, 
+    'Distributor'
+  );
+
+  // Verify they're different wallets
+  if (creatorWallet.publicKey.equals(distributorWallet.publicKey)) {
+    throw new Error('Creator and Distributor wallets must be different');
   }
 
   // Parse and validate numeric values
@@ -180,8 +202,11 @@ export function loadConfig(): BundlerConfig {
     rpcWebsocketUrl: process.env.RPC_WEBSOCKET_URL,
     network: process.env.SOLANA_NETWORK || 'mainnet-beta',
     
-    // Wallet
-    mainWallet,
+    // Wallets - NOW DUAL WALLET SETUP
+    creatorWallet,
+    distributorWallet,
+    // BACKWARD COMPATIBILITY: mainWallet points to creatorWallet
+    mainWallet: creatorWallet,
     
     // Bundler settings
     walletCount,
@@ -222,7 +247,9 @@ export function loadConfig(): BundlerConfig {
   // Log configuration summary
   logger.info('📊 Configuration loaded:');
   logger.info(`   🌐 Network: ${config.network}`);
-  logger.info(`   💰 Wallets: ${config.walletCount}`);
+  logger.info(`   🎨 Creator wallet: ${config.creatorWallet.publicKey.toBase58()}`);
+  logger.info(`   💰 Distributor wallet: ${config.distributorWallet.publicKey.toBase58()}`);
+  logger.info(`   💰 Bundled wallets: ${config.walletCount}`);
   logger.info(`   💰 SOL per wallet: ${config.swapAmountSol}`);
   logger.info(`   💰 Total estimated: ${totalSpendEstimate.toFixed(6)} SOL`);
   logger.info(`   ⚡ Priority fee: ${config.priorityFee.unitPrice} micro-lamports`);
@@ -232,6 +259,7 @@ export function loadConfig(): BundlerConfig {
   return config;
 }
 
+// Rest of the existing functions remain the same
 export function getNetworkInfo(rpcUrl: string): { isDevnet: boolean; isMainnet: boolean; network: string } {
   const url = rpcUrl.toLowerCase();
   const isDevnet = url.includes('devnet');

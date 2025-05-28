@@ -1,3 +1,5 @@
+// src/main.ts - Updated for dual wallet support
+
 import { config } from 'dotenv';
 import fs from 'fs';
 import path from 'path';
@@ -22,11 +24,17 @@ interface TokenMetadata {
 async function confirmProceed(config: any): Promise<boolean> {
   const totalCost = (config.walletCount * config.swapAmountSol) + 0.01;
   
-  console.log('\n🔍 Configuration Summary:');
-  console.log(`   💰 Wallets: ${config.walletCount}`);
+  console.log('\n🔍 DUAL WALLET Configuration Summary:');
+  console.log(`   🎨 Creator wallet: ${config.creatorWallet.publicKey.toBase58()}`);
+  console.log(`   💰 Distributor wallet: ${config.distributorWallet.publicKey.toBase58()}`);
+  console.log(`   💰 Bundled wallets: ${config.walletCount}`);
   console.log(`   💰 SOL per wallet: ${config.swapAmountSol}`);
   console.log(`   💰 Total estimated cost: ${totalCost.toFixed(6)} SOL`);
   console.log(`   🌐 Network: ${config.rpcUrl.includes('devnet') ? 'DEVNET' : 'MAINNET'}`);
+  console.log(`\n📝 How it works:`);
+  console.log(`   1. Creator wallet creates the token and does initial buy`);
+  console.log(`   2. Distributor wallet funds all bundled buy wallets`);
+  console.log(`   3. All transactions are bundled together via Jito`);
   
   if (process.env.REQUIRE_CONFIRMATION === 'false') {
     return true;
@@ -40,7 +48,7 @@ async function confirmProceed(config: any): Promise<boolean> {
   });
 
   return new Promise((resolve) => {
-    rl.question('\n🚀 Do you want to proceed with token creation and bundling? (y/N): ', (answer: string) => {
+    rl.question('\n🚀 Do you want to proceed with DUAL WALLET token creation and bundling? (y/N): ', (answer: string) => {
       rl.close();
       const confirmed = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
       resolve(confirmed);
@@ -52,7 +60,7 @@ async function getTokenMetadata(): Promise<TokenMetadata> {
   const metadata: TokenMetadata = {
     name: process.env.TOKEN_NAME || 'Default Token',
     symbol: process.env.TOKEN_SYMBOL || 'DFT',
-    description: process.env.TOKEN_DESCRIPTION || 'A token created with secure bundler',
+    description: process.env.TOKEN_DESCRIPTION || 'A token created with secure dual wallet bundler',
     imagePath: process.env.TOKEN_IMAGE_PATH || './assets/token-image.png',
     twitter: process.env.TOKEN_TWITTER,
     telegram: process.env.TOKEN_TELEGRAM,
@@ -92,7 +100,7 @@ async function checkDryRun(): Promise<boolean> {
 
 async function main() {
   try {
-    logger.info('🚀 Starting Secure Pump.fun Bundler...');
+    logger.info('🚀 Starting Secure Pump.fun DUAL WALLET Bundler...');
     
     // Check for dry run mode
     const isDryRun = await checkDryRun();
@@ -105,7 +113,7 @@ async function main() {
     validateEnvironment();
     
     // Load configuration
-    logger.info('⚙️  Loading configuration...');
+    logger.info('⚙️  Loading DUAL WALLET configuration...');
     const bundlerConfig = loadConfig();
     
     // Get token metadata
@@ -131,14 +139,15 @@ async function main() {
     }
     
     // Initialize bundler
-    logger.info('🔧 Initializing bundler...');
+    logger.info('🔧 Initializing DUAL WALLET bundler...');
     const bundler = new SecurePumpBundler(bundlerConfig);
     
     // Display wallet info
     const walletInfo = bundler.getWalletInfo();
-    logger.info('\n📊 Bundler Information:');
-    logger.info(`   Main wallet: ${walletInfo.mainWallet}`);
-    logger.info(`   Generated wallets: ${walletInfo.walletCount}`);
+    logger.info('\n📊 DUAL WALLET Bundler Information:');
+    logger.info(`   🎨 Creator wallet: ${walletInfo.creatorWallet}`);
+    logger.info(`   💰 Distributor wallet: ${walletInfo.distributorWallet}`);
+    logger.info(`   📦 Generated wallets: ${walletInfo.walletCount}`);
     
     if (isDryRun) {
       logger.info('\n🧪 DRY RUN - Testing SDK...');
@@ -154,11 +163,11 @@ async function main() {
     }
     
     // Create token and execute buys
-    logger.info('\n🚀 Starting token creation and buying...');
+    logger.info('\n🚀 Starting DUAL WALLET token creation and buying...');
     const result = await bundler.createAndBundle(tokenMetadata, false);
     
     if (result.success) {
-      logger.info('\n🎉 SUCCESS! Token created and buys executed successfully!');
+      logger.info('\n🎉 SUCCESS! DUAL WALLET Token created and buys executed successfully!');
       logger.info(`📝 Token Address: ${result.mint}`);
       logger.info(`🔗 Pump.fun URL: https://pump.fun/${result.mint}`);
       logger.info(`🔗 Solscan URL: https://solscan.io/token/${result.mint}`);
@@ -170,6 +179,9 @@ async function main() {
         success: true,
         tokenAddress: result.mint,
         signature: result.signature,
+        walletSetup: 'dual-wallet',
+        creatorWallet: walletInfo.creatorWallet,
+        distributorWallet: walletInfo.distributorWallet,
         tokenMetadata,
         bundlerConfig: {
           walletCount: bundlerConfig.walletCount,
