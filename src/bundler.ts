@@ -1,4 +1,4 @@
-// src/bundler.ts - Enhanced with SOL retention for future transactions
+// src/bundler.ts - MODIFIED: Added token distribution functionality
 
 import {
   Connection,
@@ -8,6 +8,13 @@ import {
   Transaction,
   ComputeBudgetProgram,
 } from '@solana/web3.js';
+import {
+  TOKEN_PROGRAM_ID,
+  getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction,
+  createTransferInstruction,
+  getAccount,
+} from '@solana/spl-token';
 import { BundlerConfig } from './config';
 import { logger } from './utils/logger';
 import { bs58 } from '@coral-xyz/anchor/dist/cjs/utils/bytes';
@@ -30,16 +37,32 @@ export interface TokenMetadata {
   website?: string;
 }
 
+// ENHANCED: Bundle result with distribution info
 export interface BundleResult {
   success: boolean;
   mint?: string;
   signature?: string;
   error?: string;
-  // NEW: Return wallet info for future use
+  // Original bundled wallets (4 initial buyers)
   bundledWallets?: {
     publicKey: string;
     privateKey: string;
     remainingSOL: number;
+  }[];
+  // NEW: Distribution results
+  distributionResults?: {
+    success: boolean;
+    totalDistributedWallets: number;
+    distributionSignatures: string[];
+    finalWalletCount: number;
+  };
+  // NEW: All final wallets (original + distributed)
+  allFinalWallets?: {
+    publicKey: string;
+    privateKey: string;
+    tokenBalance: number;
+    solBalance: number;
+    source: 'original' | 'distributed';
   }[];
 }
 
@@ -72,10 +95,12 @@ export class SecurePumpBundler {
   }
 
   private generateWallets(): void {
-    logger.info(`🔧 Generating ${this.config.walletCount} wallets...`);
+    // FIXED: Generate only 4 wallets for atomic bundle
+    const initialWalletCount = 4;
+    logger.info(`🔧 Generating ${initialWalletCount} wallets for atomic bundle...`);
     
     this.wallets = [];
-    for (let i = 0; i < this.config.walletCount; i++) {
+    for (let i = 0; i < initialWalletCount; i++) {
       const wallet = Keypair.generate();
       this.wallets.push(wallet);
     }
@@ -96,46 +121,48 @@ export class SecurePumpBundler {
     const distributorBalanceSOL = distributorBalance / LAMPORTS_PER_SOL;
     logger.info(`   💰 Distributor wallet: ${distributorBalanceSOL.toFixed(6)} SOL`);
     
-    // IMPROVED: More accurate funding calculation
+    // FIXED: Calculate for 4 initial wallets + distribution needs
     const buyAmount = this.config.swapAmountSol;
-    const retainAmount = parseFloat(process.env.RETAIN_SOL_PER_WALLET || '0.005'); // Keep 0.005 SOL for future txs
-    const txFees = 0.002; // Estimated transaction fees
+    const retainAmount = parseFloat(process.env.RETAIN_SOL_PER_WALLET || '0.005');
+    const txFees = 0.002;
     const solPerWallet = buyAmount + retainAmount + txFees;
     
-    const totalDistributorNeeded = (this.config.walletCount * solPerWallet) + 0.01; // Buffer
+    const totalDistributorNeeded = (4 * solPerWallet) + 0.01; // 4 wallets + buffer
     const creatorNeeded = buyAmount + 0.05; // For token creation and initial buy
     
-    logger.info(`💰 IMPROVED Balance requirements:`);
+    // ADDITIONAL: Calculate distribution SOL needs
+    const finalWalletCount = parseInt(process.env.FINAL_WALLET_COUNT || '8');
+    const additionalWallets = finalWalletCount - 4;
+    const solPerDistributedWallet = parseFloat(process.env.SOL_PER_DISTRIBUTED_WALLET || '0.005');
+    const distributionSolNeeded = additionalWallets * solPerDistributedWallet;
+    
+    logger.info(`💰 Balance requirements:`);
     logger.info(`   🎨 Creator needs: ${creatorNeeded.toFixed(6)} SOL (creation + initial buy)`);
-    logger.info(`   💰 Distributor needs: ${totalDistributorNeeded.toFixed(6)} SOL`);
-    logger.info(`     - Buy amount per wallet: ${buyAmount.toFixed(6)} SOL`);
-    logger.info(`     - Retain per wallet: ${retainAmount.toFixed(6)} SOL`);
-    logger.info(`     - Estimated fees: ${txFees.toFixed(6)} SOL per wallet`);
+    logger.info(`   💰 Distributor needs: ${totalDistributorNeeded.toFixed(6)} SOL (4 initial wallets)`);
+    logger.info(`   📦 Distribution needs: ${distributionSolNeeded.toFixed(6)} SOL (${additionalWallets} new wallets)`);
+    logger.info(`   🎯 Total estimated: ${(creatorNeeded + totalDistributorNeeded + distributionSolNeeded).toFixed(6)} SOL`);
     
     // Validate balances
     if (creatorBalanceSOL < creatorNeeded) {
       throw new Error(`Creator wallet insufficient balance. Need ${creatorNeeded.toFixed(6)} SOL, have ${creatorBalanceSOL.toFixed(6)} SOL`);
     }
     
-    if (distributorBalanceSOL < totalDistributorNeeded) {
-      throw new Error(`Distributor wallet insufficient balance. Need ${totalDistributorNeeded.toFixed(6)} SOL, have ${distributorBalanceSOL.toFixed(6)} SOL`);
+    if (distributorBalanceSOL < totalDistributorNeeded + distributionSolNeeded) {
+      throw new Error(`Distributor wallet insufficient balance. Need ${(totalDistributorNeeded + distributionSolNeeded).toFixed(6)} SOL, have ${distributorBalanceSOL.toFixed(6)} SOL`);
     }
     
     logger.info('✅ All wallet balances are sufficient');
   }
 
   private async distributeSOL(): Promise<void> {
-    // IMPROVED: More precise funding calculation
+    // FIXED: Distribute to 4 wallets only
     const buyAmount = this.config.swapAmountSol;
     const retainAmount = parseFloat(process.env.RETAIN_SOL_PER_WALLET || '0.005');
     const txFees = 0.002;
     const solPerWallet = buyAmount + retainAmount + txFees;
     
-    logger.info('💸 IMPROVED SOL distribution to bundled wallets...');
+    logger.info('💸 SOL distribution to 4 atomic bundle wallets...');
     logger.info(`   💰 Each wallet will receive: ${solPerWallet.toFixed(6)} SOL`);
-    logger.info(`     - For token buy: ${buyAmount.toFixed(6)} SOL`);
-    logger.info(`     - For future txs: ${retainAmount.toFixed(6)} SOL`);
-    logger.info(`     - For tx fees: ${txFees.toFixed(6)} SOL`);
     
     const tx = new Transaction();
     
@@ -165,7 +192,190 @@ export class SecurePumpBundler {
     logger.info(`   💰 Distributed ${solPerWallet.toFixed(6)} SOL to each of ${this.wallets.length} wallets`);
   }
 
-  async createAndBundle(metadata: TokenMetadata, testMode: boolean = false): Promise<BundleResult> {
+  // NEW: Token distribution functionality
+  private async distributeTokens(mint: string, sourceWallets: any[]): Promise<{
+    success: boolean;
+    distributedWallets: any[];
+    signatures: string[];
+    totalDistributed: number;
+  }> {
+    const finalWalletCount = parseInt(process.env.FINAL_WALLET_COUNT || '8');
+    const additionalWalletsNeeded = finalWalletCount - sourceWallets.length;
+    
+    if (additionalWalletsNeeded <= 0) {
+      logger.info('🎯 No additional wallets needed');
+      return {
+        success: true,
+        distributedWallets: [],
+        signatures: [],
+        totalDistributed: 0
+      };
+    }
+    
+    logger.info(`🔄 Starting token distribution...`);
+    logger.info(`   Source wallets: ${sourceWallets.length}`);
+    logger.info(`   Additional wallets needed: ${additionalWalletsNeeded}`);
+    
+    const walletsPerSource = Math.ceil(additionalWalletsNeeded / sourceWallets.length);
+    const solPerDistributedWallet = parseFloat(process.env.SOL_PER_DISTRIBUTED_WALLET || '0.005');
+    
+    logger.info(`   Wallets per source: ${walletsPerSource}`);
+    logger.info(`   SOL per new wallet: ${solPerDistributedWallet}`);
+    
+    const allDistributedWallets: any[] = [];
+    const allSignatures: string[] = [];
+    let totalDistributed = 0;
+    
+    for (let i = 0; i < sourceWallets.length; i++) {
+      const sourceWallet = sourceWallets[i];
+      
+      try {
+        logger.info(`\n📦 Distributing from wallet ${i + 1}: ${sourceWallet.publicKey.slice(0, 8)}...`);
+        
+        // Get current token balance
+        const sourceATA = await getAssociatedTokenAddress(
+          new (require('@solana/web3.js').PublicKey)(mint),
+          new (require('@solana/web3.js').PublicKey)(sourceWallet.publicKey),
+          false
+        );
+        
+        const tokenAccount = await getAccount(this.connection, sourceATA);
+        const totalTokens = Number(tokenAccount.amount);
+        
+        logger.info(`   Token balance: ${totalTokens.toLocaleString()} tokens`);
+        
+        // Keep 5% in source wallet, distribute 95%
+        const tokensToDistribute = Math.floor(totalTokens * 0.95);
+        
+        // Generate random distribution amounts
+        const distributionAmounts = this.generateRandomAmounts(tokensToDistribute, walletsPerSource);
+        
+        // Create new wallets and distribution transaction
+        const newWallets: Keypair[] = [];
+        const newWalletData: any[] = [];
+        
+        for (let j = 0; j < walletsPerSource; j++) {
+          const newWallet = Keypair.generate();
+          newWallets.push(newWallet);
+          newWalletData.push({
+            publicKey: newWallet.publicKey.toBase58(),
+            privateKey: bs58.encode(newWallet.secretKey),
+            expectedTokens: distributionAmounts[j],
+            expectedSOL: solPerDistributedWallet
+          });
+        }
+        
+        // Create distribution transaction
+        const tx = new Transaction();
+        
+        // Recreate source keypair
+        const sourceKeypair = Keypair.fromSecretKey(bs58.decode(sourceWallet.privateKey));
+        
+        for (let j = 0; j < newWallets.length; j++) {
+          const newWallet = newWallets[j];
+          const tokenAmount = distributionAmounts[j];
+          
+          // Send SOL to new wallet
+          tx.add(
+            SystemProgram.transfer({
+              fromPubkey: sourceKeypair.publicKey,
+              toPubkey: newWallet.publicKey,
+              lamports: BigInt(Math.floor(solPerDistributedWallet * LAMPORTS_PER_SOL)),
+            })
+          );
+          
+          // Create ATA for new wallet
+          const newWalletATA = await getAssociatedTokenAddress(
+            new (require('@solana/web3.js').PublicKey)(mint),
+            newWallet.publicKey,
+            false
+          );
+          
+          tx.add(
+            createAssociatedTokenAccountInstruction(
+              sourceKeypair.publicKey, // Payer
+              newWalletATA,
+              newWallet.publicKey, // Owner
+              new (require('@solana/web3.js').PublicKey)(mint)
+            )
+          );
+          
+          // Transfer tokens
+          tx.add(
+            createTransferInstruction(
+              sourceATA,
+              newWalletATA,
+              sourceKeypair.publicKey,
+              BigInt(tokenAmount),
+              [],
+              TOKEN_PROGRAM_ID
+            )
+          );
+          
+          logger.info(`     → ${newWallet.publicKey.toBase58().slice(0, 8)}... ${tokenAmount.toLocaleString()} tokens + ${solPerDistributedWallet} SOL`);
+        }
+        
+        // Send distribution transaction
+        const signature = await this.connection.sendTransaction(tx, [sourceKeypair], {
+          skipPreflight: false,
+          maxRetries: 3,
+        });
+        
+        await this.connection.confirmTransaction(signature, 'confirmed');
+        
+        logger.info(`   ✅ Distribution completed: ${signature}`);
+        
+        allDistributedWallets.push(...newWalletData);
+        allSignatures.push(signature);
+        totalDistributed += tokensToDistribute;
+        
+        // Wait between distributions
+        if (i < sourceWallets.length - 1) {
+          logger.info(`   ⏳ Waiting 2s before next distribution...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        }
+        
+      } catch (error) {
+        logger.error(`   ❌ Distribution failed for wallet ${i + 1}:`, error);
+      }
+    }
+    
+    logger.info(`\n📊 Distribution summary:`);
+    logger.info(`   New wallets created: ${allDistributedWallets.length}`);
+    logger.info(`   Total tokens distributed: ${totalDistributed.toLocaleString()}`);
+    logger.info(`   Distribution transactions: ${allSignatures.length}`);
+    
+    return {
+      success: allDistributedWallets.length > 0,
+      distributedWallets: allDistributedWallets,
+      signatures: allSignatures,
+      totalDistributed
+    };
+  }
+  
+  // Helper function to generate random distribution amounts
+  private generateRandomAmounts(totalAmount: number, count: number): number[] {
+    if (count === 1) return [totalAmount];
+    
+    const amounts: number[] = [];
+    let remaining = totalAmount;
+    
+    for (let i = 0; i < count - 1; i++) {
+      const baseAmount = Math.floor(remaining / (count - i));
+      const variance = Math.floor(baseAmount * 0.15); // 15% variance
+      const randomVariance = Math.floor((Math.random() - 0.5) * 2 * variance);
+      const amount = Math.max(1, baseAmount + randomVariance);
+      
+      amounts.push(Math.min(amount, remaining - (count - i - 1)));
+      remaining -= amounts[i];
+    }
+    
+    amounts.push(remaining);
+    return amounts;
+  }
+
+  // MODIFIED: Main function with distribution support
+  async createAndBundle(metadata: TokenMetadata, testMode: boolean = false, enableDistribution: boolean = true): Promise<BundleResult> {
     if (testMode) {
       logger.info('🧪 TEST MODE - Validating working SDK...');
       
@@ -191,7 +401,7 @@ export class SecurePumpBundler {
     }
   
     try {
-      logger.info('🚀 Starting DUAL WALLET bundled token creation and buying...');
+      logger.info('🚀 Starting ATOMIC bundled token creation and buying (4 wallets)...');
       
       // Step 1: Check wallet balances
       await this.checkWalletBalances();
@@ -221,11 +431,11 @@ export class SecurePumpBundler {
       const mint = Keypair.generate();
       logger.info(`🪙 Creating token with mint: ${mint.publicKey.toBase58()}`);
       
-      // Step 5: Prepare bundled buys (these wallets are funded by distributor)
+      // Step 5: Prepare bundled buys (4 wallets only for atomic execution)
       const buyAmountSol = BigInt(Math.floor(this.config.swapAmountSol * LAMPORTS_PER_SOL));
       const slippageBasisPoints = BigInt(this.config.slippageBasisPoints);
       
-      // Create bundled buys for all wallets (funded by distributor)
+      // Create bundled buys for 4 wallets
       const bundledBuys: BundledBuy[] = this.wallets.map((wallet, index) => {
         // Add randomization to buy amounts (±20%)
         const variance = 0.8 + (Math.random() * 0.4); // 0.8 to 1.2
@@ -239,7 +449,7 @@ export class SecurePumpBundler {
         };
       });
       
-      logger.info('🔨 Creating bundled transaction with DUAL WALLET system...');
+      logger.info('🔨 Creating ATOMIC bundled transaction (CREATE + 4 buys)...');
       logger.info(`   🎨 Creator wallet handles: Token creation + initial buy`);
       logger.info(`   💰 Distributor wallet funded: ${bundledBuys.length} bundled buy wallets`);
       
@@ -248,13 +458,13 @@ export class SecurePumpBundler {
         unitPrice: this.config.priorityFee.unitPrice,
       };
       
-      // Step 6: Execute bundled create and buy WITH DUAL WALLET SETUP
+      // Step 6: Execute bundled create and buy WITH ATOMIC BUNDLE (5 transactions total)
       const createResult = await this.pumpFunSDK.createAndBuyBundled(
         this.config.creatorWallet,    // CREATOR: Creates token and does initial buy
         mint,                         // mint keypair
         createTokenMetadata,          // metadata
         buyAmountSol,                // creator's initial buy amount
-        bundledBuys,                 // bundled buys (funded by distributor)
+        bundledBuys,                 // bundled buys (4 wallets)
         slippageBasisPoints,         // slippage
         priorityFees,                // priority fees
         'confirmed',                 // commitment
@@ -262,27 +472,93 @@ export class SecurePumpBundler {
       );
       
       if (!createResult.success) {
-        throw new Error(`Bundled transaction failed: ${createResult.error}`);
+        throw new Error(`Atomic bundled transaction failed: ${createResult.error}`);
       }
       
-      logger.info(`✅ DUAL WALLET bundled transaction successful!`);
+      logger.info(`✅ ATOMIC bundled transaction successful!`);
       logger.info(`   Signature: ${createResult.signature}`);
       logger.info(`   Mint: ${mint.publicKey.toBase58()}`);
       logger.info(`   View on Pump.fun: https://pump.fun/${mint.publicKey.toBase58()}`);
       
-      logger.info(`🎉 Operation completed with DUAL WALLET bundled SDK!`);
-      logger.info(`   🎨 Creator wallet: Token created + initial buy ✅`);
-      logger.info(`   💰 Distributor wallet: Funded ${bundledBuys.length} bundled buys ✅`);
-      logger.info(`   📦 Bundled buys: ${bundledBuys.length} wallets ✅`);
-      
-      // Step 7: IMPROVED cleanup with retention option
+      // Step 7: Get initial wallet info with cleanup
       const walletInfo = await this.improvedCleanup();
+      
+      // Step 8: Execute token distribution if enabled
+      let distributionResults;
+      let allFinalWallets: any[] = [];
+      
+      if (enableDistribution) {
+        logger.info('\n🔄 Starting token distribution phase...');
+        
+        // Wait for initial transactions to settle
+        await new Promise(resolve => setTimeout(resolve, 5000));
+        
+        distributionResults = await this.distributeTokens(mint.publicKey.toBase58(), walletInfo);
+        
+        // Compile all final wallets
+        // Add original wallets (now with less tokens)
+        for (const wallet of walletInfo) {
+          try {
+            const tokenBalance = await this.getTokenBalance(wallet.publicKey, mint.publicKey.toBase58());
+            const solBalance = await this.connection.getBalance(new (require('@solana/web3.js').PublicKey)(wallet.publicKey));
+            
+            allFinalWallets.push({
+              publicKey: wallet.publicKey,
+              privateKey: wallet.privateKey,
+              tokenBalance,
+              solBalance: solBalance / LAMPORTS_PER_SOL,
+              source: 'original'
+            });
+          } catch (error) {
+            logger.warn(`Could not get updated balance for original wallet ${wallet.publicKey.slice(0, 8)}`);
+          }
+        }
+        
+        // Add distributed wallets
+        for (const distributedWallet of distributionResults.distributedWallets) {
+          allFinalWallets.push({
+            publicKey: distributedWallet.publicKey,
+            privateKey: distributedWallet.privateKey,
+            tokenBalance: distributedWallet.expectedTokens,
+            solBalance: distributedWallet.expectedSOL,
+            source: 'distributed'
+          });
+        }
+      } else {
+        // No distribution, just use original wallets
+        allFinalWallets = walletInfo.map(wallet => ({
+          publicKey: wallet.publicKey,
+          privateKey: wallet.privateKey,
+          tokenBalance: 0, // Would need to fetch
+          solBalance: wallet.remainingSOL,
+          source: 'original'
+        }));
+      }
+      
+      // Step 9: Save all final wallets
+      this.saveAllFinalWallets(allFinalWallets, mint.publicKey.toBase58());
+      
+      logger.info(`🎉 Operation completed with ATOMIC bundling + distribution!`);
+      logger.info(`   🎨 Creator wallet: Token created + initial buy ✅`);
+      logger.info(`   💰 Distributor wallet: Funded 4 atomic bundled buys ✅`);
+      logger.info(`   📦 Atomic bundle: 4 wallets ✅`);
+      if (enableDistribution && distributionResults) {
+        logger.info(`   🔄 Token distribution: ${distributionResults.distributedWallets.length} new wallets ✅`);
+        logger.info(`   🏁 Total final wallets: ${allFinalWallets.length} ✅`);
+      }
       
       return {
         success: true,
         mint: mint.publicKey.toBase58(),
         signature: createResult.signature,
-        bundledWallets: walletInfo, // NEW: Return wallet info for future use
+        bundledWallets: walletInfo,
+        distributionResults: distributionResults ? {
+          success: distributionResults.success,
+          totalDistributedWallets: distributionResults.distributedWallets.length,
+          distributionSignatures: distributionResults.signatures,
+          finalWalletCount: allFinalWallets.length
+        } : undefined,
+        allFinalWallets
       };
       
     } catch (error) {
@@ -301,7 +577,50 @@ export class SecurePumpBundler {
     }
   }
 
-  // NEW: Improved cleanup with SOL retention option
+  // Helper method to get token balance
+  private async getTokenBalance(walletAddress: string, mint: string): Promise<number> {
+    try {
+      const walletPubkey = new (require('@solana/web3.js').PublicKey)(walletAddress);
+      const mintPubkey = new (require('@solana/web3.js').PublicKey)(mint);
+      const ata = await getAssociatedTokenAddress(mintPubkey, walletPubkey, false);
+      const account = await getAccount(this.connection, ata);
+      return Number(account.amount);
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  // NEW: Save all final wallets to file
+  private saveAllFinalWallets(allWallets: any[], mint: string): void {
+    const walletData = {
+      sessionId: this.sessionId,
+      createdAt: new Date().toISOString(),
+      mint,
+      network: this.config.network,
+      totalWallets: allWallets.length,
+      originalWallets: allWallets.filter(w => w.source === 'original').length,
+      distributedWallets: allWallets.filter(w => w.source === 'distributed').length,
+      wallets: allWallets.map(wallet => ({
+        publicKey: wallet.publicKey,
+        privateKey: wallet.privateKey,
+        tokenBalance: wallet.tokenBalance,
+        solBalance: wallet.solBalance,
+        source: wallet.source
+      }))
+    };
+    
+    const walletFilePath = path.join(process.cwd(), 'wallets', `final_wallets_${this.sessionId}.json`);
+    const walletsDir = path.dirname(walletFilePath);
+    
+    if (!fs.existsSync(walletsDir)) {
+      fs.mkdirSync(walletsDir, { recursive: true });
+    }
+    
+    fs.writeFileSync(walletFilePath, JSON.stringify(walletData, null, 2));
+    logger.info(`💾 All final wallets saved to: ${walletFilePath}`);
+  }
+
+  // Keep existing cleanup method
   private async improvedCleanup(): Promise<{publicKey: string; privateKey: string; remainingSOL: number}[]> {
     const retainAmount = parseFloat(process.env.RETAIN_SOL_PER_WALLET || '0.005');
     const retainLamports = Math.floor(retainAmount * LAMPORTS_PER_SOL);
@@ -378,26 +697,6 @@ export class SecurePumpBundler {
     logger.info(`✅ IMPROVED cleanup completed: ${successCount}/${this.wallets.length} wallets processed`);
     logger.info(`💰 Total recovered to distributor: ${(totalRecovered / LAMPORTS_PER_SOL).toFixed(6)} SOL`);
     logger.info(`🎯 Each wallet retained ~${retainAmount} SOL for future transactions`);
-    
-    // NEW: Save wallet info to file for future use
-    if (walletInfo.length > 0) {
-      const walletFilePath = path.join(process.cwd(), 'wallets', `${this.sessionId}_bundled_wallets.json`);
-      const walletsDir = path.dirname(walletFilePath);
-      
-      if (!fs.existsSync(walletsDir)) {
-        fs.mkdirSync(walletsDir, { recursive: true });
-      }
-      
-      const walletData = {
-        sessionId: this.sessionId,
-        createdAt: new Date().toISOString(),
-        retainedSOLPerWallet: retainAmount,
-        wallets: walletInfo,
-      };
-      
-      fs.writeFileSync(walletFilePath, JSON.stringify(walletData, null, 2));
-      logger.info(`💾 Wallet info saved to: ${walletFilePath}`);
-    }
     
     return walletInfo;
   }

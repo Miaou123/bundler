@@ -1,9 +1,9 @@
-// src/main.ts - Updated for dual wallet support
+// src/main.ts - Updated for atomic bundling + distribution
 
 import { config } from 'dotenv';
 import fs from 'fs';
 import path from 'path';
-// Use the corrected bundler
+// Use the updated bundler
 import { SecurePumpBundler } from './bundler';
 import { loadConfig, validateEnvironment } from './config';
 import { logger } from './utils/logger';
@@ -22,19 +22,28 @@ interface TokenMetadata {
 
 // Simple confirmation using readline (built-in Node.js)
 async function confirmProceed(config: any): Promise<boolean> {
-  const totalCost = (config.walletCount * config.swapAmountSol) + 0.01;
+  const finalWalletCount = parseInt(process.env.FINAL_WALLET_COUNT || '8');
+  const solPerDistributed = parseFloat(process.env.SOL_PER_DISTRIBUTED_WALLET || '0.005');
+  const additionalWallets = finalWalletCount - 4;
   
-  console.log('\n🔍 DUAL WALLET Configuration Summary:');
+  const atomicCost = (4 * config.swapAmountSol) + 0.01;
+  const distributionCost = additionalWallets * solPerDistributed;
+  const totalCost = atomicCost + distributionCost + 0.01;
+  
+  console.log('\n🔍 ATOMIC BUNDLE + DISTRIBUTION Configuration:');
   console.log(`   🎨 Creator wallet: ${config.creatorWallet.publicKey.toBase58()}`);
   console.log(`   💰 Distributor wallet: ${config.distributorWallet.publicKey.toBase58()}`);
-  console.log(`   💰 Bundled wallets: ${config.walletCount}`);
-  console.log(`   💰 SOL per wallet: ${config.swapAmountSol}`);
+  console.log(`   ⚛️  Atomic bundle: 4 wallets (single Jito bundle)`);
+  console.log(`   🔄 Distribution: ${additionalWallets} additional wallets`);
+  console.log(`   🏁 Final total: ${finalWalletCount} wallets`);
+  console.log(`   💰 Atomic cost: ${atomicCost.toFixed(6)} SOL`);
+  console.log(`   💰 Distribution cost: ${distributionCost.toFixed(6)} SOL`);
   console.log(`   💰 Total estimated cost: ${totalCost.toFixed(6)} SOL`);
   console.log(`   🌐 Network: ${config.rpcUrl.includes('devnet') ? 'DEVNET' : 'MAINNET'}`);
   console.log(`\n📝 How it works:`);
-  console.log(`   1. Creator wallet creates the token and does initial buy`);
-  console.log(`   2. Distributor wallet funds all bundled buy wallets`);
-  console.log(`   3. All transactions are bundled together via Jito`);
+  console.log(`   1. ⚛️  Atomic bundle: CREATE + 4 buys (guaranteed success or fail together)`);
+  console.log(`   2. 🔄 Distribution: Each of 4 wallets distributes tokens to new wallets`);
+  console.log(`   3. 🎯 Result: ${finalWalletCount} wallets total with realistic distribution`);
   
   if (process.env.REQUIRE_CONFIRMATION === 'false') {
     return true;
@@ -48,7 +57,7 @@ async function confirmProceed(config: any): Promise<boolean> {
   });
 
   return new Promise((resolve) => {
-    rl.question('\n🚀 Do you want to proceed with DUAL WALLET token creation and bundling? (y/N): ', (answer: string) => {
+    rl.question('\n🚀 Do you want to proceed with ATOMIC bundling + distribution? (y/N): ', (answer: string) => {
       rl.close();
       const confirmed = answer.toLowerCase() === 'y' || answer.toLowerCase() === 'yes';
       resolve(confirmed);
@@ -58,9 +67,9 @@ async function confirmProceed(config: any): Promise<boolean> {
 
 async function getTokenMetadata(): Promise<TokenMetadata> {
   const metadata: TokenMetadata = {
-    name: process.env.TOKEN_NAME || 'Default Token',
-    symbol: process.env.TOKEN_SYMBOL || 'DFT',
-    description: process.env.TOKEN_DESCRIPTION || 'A token created with secure dual wallet bundler',
+    name: process.env.TOKEN_NAME || 'AtomicDistro',
+    symbol: process.env.TOKEN_SYMBOL || 'ADST',
+    description: process.env.TOKEN_DESCRIPTION || 'A token created with atomic bundling + distribution',
     imagePath: process.env.TOKEN_IMAGE_PATH || './assets/token-image.png',
     twitter: process.env.TOKEN_TWITTER,
     telegram: process.env.TOKEN_TELEGRAM,
@@ -100,7 +109,7 @@ async function checkDryRun(): Promise<boolean> {
 
 async function main() {
   try {
-    logger.info('🚀 Starting Secure Pump.fun DUAL WALLET Bundler...');
+    logger.info('🚀 Starting Secure Pump.fun ATOMIC BUNDLER + DISTRIBUTION...');
     
     // Check for dry run mode
     const isDryRun = await checkDryRun();
@@ -113,7 +122,7 @@ async function main() {
     validateEnvironment();
     
     // Load configuration
-    logger.info('⚙️  Loading DUAL WALLET configuration...');
+    logger.info('⚙️  Loading configuration...');
     const bundlerConfig = loadConfig();
     
     // Get token metadata
@@ -139,19 +148,20 @@ async function main() {
     }
     
     // Initialize bundler
-    logger.info('🔧 Initializing DUAL WALLET bundler...');
+    logger.info('🔧 Initializing ATOMIC bundler with distribution...');
     const bundler = new SecurePumpBundler(bundlerConfig);
     
     // Display wallet info
     const walletInfo = bundler.getWalletInfo();
-    logger.info('\n📊 DUAL WALLET Bundler Information:');
+    logger.info('\n📊 Bundler Information:');
     logger.info(`   🎨 Creator wallet: ${walletInfo.creatorWallet}`);
     logger.info(`   💰 Distributor wallet: ${walletInfo.distributorWallet}`);
-    logger.info(`   📦 Generated wallets: ${walletInfo.walletCount}`);
+    logger.info(`   📦 Atomic bundle wallets: ${walletInfo.walletCount}`);
+    logger.info(`   🎯 Final target wallets: ${process.env.FINAL_WALLET_COUNT || '8'}`);
     
     if (isDryRun) {
       logger.info('\n🧪 DRY RUN - Testing SDK...');
-      const result = await bundler.createAndBundle(tokenMetadata, true);
+      const result = await bundler.createAndBundle(tokenMetadata, true, false);
       
       if (result.success) {
         logger.info('✅ All validations passed - ready to run!');
@@ -162,15 +172,25 @@ async function main() {
       return;
     }
     
-    // Create token and execute buys
-    logger.info('\n🚀 Starting DUAL WALLET token creation and buying...');
-    const result = await bundler.createAndBundle(tokenMetadata, false);
+    // Create token and execute atomic bundle + distribution
+    logger.info('\n🚀 Starting ATOMIC bundling + distribution...');
+    const result = await bundler.createAndBundle(tokenMetadata, false, true);
     
     if (result.success) {
-      logger.info('\n🎉 SUCCESS! DUAL WALLET Token created and buys executed successfully!');
+      logger.info('\n🎉 SUCCESS! ATOMIC bundling + distribution completed!');
       logger.info(`📝 Token Address: ${result.mint}`);
       logger.info(`🔗 Pump.fun URL: https://pump.fun/${result.mint}`);
       logger.info(`🔗 Solscan URL: https://solscan.io/token/${result.mint}`);
+      
+      // Display results
+      if (result.distributionResults) {
+        logger.info(`\n📊 DISTRIBUTION RESULTS:`);
+        logger.info(`   ⚛️  Atomic bundle wallets: ${result.bundledWallets?.length || 0}`);
+        logger.info(`   🔄 Distributed wallets: ${result.distributionResults.totalDistributedWallets}`);
+        logger.info(`   🏁 Total final wallets: ${result.distributionResults.finalWalletCount}`);
+        logger.info(`   📦 Distribution transactions: ${result.distributionResults.distributionSignatures.length}`);
+        logger.info(`   ✅ Distribution success: ${result.distributionResults.success}`);
+      }
       
       // Save results
       const resultsPath = path.join(process.cwd(), 'logs', 'results.json');
@@ -179,20 +199,24 @@ async function main() {
         success: true,
         tokenAddress: result.mint,
         signature: result.signature,
-        walletSetup: 'dual-wallet',
+        strategy: 'atomic-bundle-distribution',
+        atomicBundleWallets: result.bundledWallets?.length || 0,
+        distributedWallets: result.distributionResults?.totalDistributedWallets || 0,
+        totalFinalWallets: result.allFinalWallets?.length || 0,
         creatorWallet: walletInfo.creatorWallet,
         distributorWallet: walletInfo.distributorWallet,
         tokenMetadata,
         bundlerConfig: {
           walletCount: bundlerConfig.walletCount,
           swapAmountSol: bundlerConfig.swapAmountSol,
+          finalWalletCount: process.env.FINAL_WALLET_COUNT,
         },
       };
       fs.writeFileSync(resultsPath, JSON.stringify(resultsData, null, 2));
       logger.info(`💾 Results saved to: ${resultsPath}`);
       
     } else {
-      logger.error('\n💥 FAILED to create and buy token');
+      logger.error('\n💥 FAILED to complete atomic bundling + distribution');
       logger.error(`Error: ${result.error}`);
       
       process.exit(1);
