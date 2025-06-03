@@ -95,8 +95,8 @@ export class SecurePumpBundler {
   }
 
   private generateWallets(): void {
-    // FIXED: Generate only 4 wallets for atomic bundle
-    const initialWalletCount = 4;
+    // FIXED: Generate only 3 wallets for atomic bundle
+    const initialWalletCount = this.config.walletCount; 
     logger.info(`🔧 Generating ${initialWalletCount} wallets for atomic bundle...`);
     
     this.wallets = [];
