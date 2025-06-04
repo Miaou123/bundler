@@ -1,4 +1,4 @@
-// src/pumpfun.ts - Fixed version for dual wallet system
+// src/pumpfun.ts - SECURE version with anti-MEV protections
 
 import {
   Commitment,
@@ -9,6 +9,7 @@ import {
   Transaction,
   TransactionInstruction,
   VersionedTransaction,
+  ComputeBudgetProgram,
 } from "@solana/web3.js";
 import { Program, Provider } from "@coral-xyz/anchor";
 import { GlobalAccount } from "./sdk/globalAccount";
@@ -44,20 +45,17 @@ import {
   sendTx,
 } from "./sdk/util";
 import { Pump, IDL } from "./sdk/IDL/index";
-import type { BundlerConfig } from "./config";
+import { sendSecureJitoBundle } from './jito';
 
 const PROGRAM_ID = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
-const MPL_TOKEN_METADATA_PROGRAM_ID =
-  "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
+const MPL_TOKEN_METADATA_PROGRAM_ID = "metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s";
 
 export const GLOBAL_ACCOUNT_SEED = "global";
 export const MINT_AUTHORITY_SEED = "mint-authority";
 export const BONDING_CURVE_SEED = "bonding-curve";
 export const METADATA_SEED = "metadata";
-
 export const DEFAULT_DECIMALS = 6;
 
-// Interface for bundled buys
 export interface BundledBuy {
   wallet: Keypair;
   solAmount: bigint;
@@ -72,7 +70,217 @@ export class PumpFunSDK {
     this.connection = this.program.provider.connection;
   }
 
-  // Your existing createAndBuy method (keep as is for compatibility)
+  // SECURE: Main bundled create and buy method with anti-MEV protections
+  async createAndBuyBundledSecure(
+    creator: Keypair,
+    mint: Keypair,
+    createTokenMetadata: CreateTokenMetadata,
+    creatorBuyAmountSol: bigint,
+    additionalBuys: BundledBuy[],
+    slippageBasisPoints: bigint = 500n,
+    priorityFees?: PriorityFee,
+    jitoPriority: 'low' | 'medium' | 'high' | 'max' = 'high',
+    commitment: Commitment = DEFAULT_COMMITMENT,
+    finality: Finality = DEFAULT_FINALITY
+  ): Promise<TransactionResult> {
+    
+    console.log(`🛡️  SECURE: Creating protected Jito bundle with ${additionalBuys.length} buys`);
+    
+    // 1. Upload metadata
+    let tokenMetadata = await this.createTokenMetadata(createTokenMetadata);
+    const globalAccount = await this.getGlobalAccount(commitment);
+
+    // 2. SECURE: Build single transaction with embedded tip
+    const allInstructions = await this.buildSecureTokenInstructions(
+      creator,
+      mint,
+      createTokenMetadata,
+      tokenMetadata.metadataUri,
+      creatorBuyAmountSol,
+      additionalBuys,
+      globalAccount,
+      slippageBasisPoints,
+      priorityFees
+    );
+
+    console.log(`🛡️  Built ${allInstructions.length} instructions for secure bundle`);
+
+    // 3. SECURE: Define protection checks
+    const preChecks = [
+      {
+        account: creator.publicKey,
+        expectedBalance: Number(creatorBuyAmountSol) + 50_000_000, // Ensure sufficient balance
+        mustExist: true,
+      },
+      {
+        account: globalAccount.authority,
+        mustExist: true,
+      }
+    ];
+
+    const postChecks = [
+      {
+        account: mint.publicKey,
+        minBalance: 1, // Ensure mint was created
+      }
+    ];
+
+    // 4. SECURE: Send via protected Jito bundle (JITO-ONLY)
+    console.log(`🛡️  Sending via SECURE Jito bundle system...`);
+    
+    const secureResult = await sendSecureJitoBundle(
+      allInstructions,
+      creator,
+      this.connection,
+      {
+        priority: jitoPriority,
+        preChecks,
+        postChecks,
+        priorityFees: priorityFees ? {
+          unitLimit: priorityFees.unitLimit,
+          unitPrice: priorityFees.unitPrice
+        } : undefined,
+      }
+    );
+
+    if (secureResult.success) {
+      console.log(`🛡️  SECURE bundle successful!`);
+      console.log(`   Signature: ${secureResult.signature}`);
+      console.log(`   Bundle ID: ${secureResult.bundleId}`);
+      console.log(`   Tip Amount: ${secureResult.tipAmount} SOL`);
+      console.log(`   🛡️  Protections verified:`);
+      console.log(`     Tip in main TX: ${secureResult.protections.tipInMainTx}`);
+      console.log(`     Pre-checks: ${secureResult.protections.hasPreChecks}`);
+      console.log(`     Post-checks: ${secureResult.protections.hasPostChecks}`);
+      console.log(`     JITO-only: ${secureResult.protections.jitoOnly}`);
+      
+      return {
+        success: true,
+        signature: secureResult.signature,
+      };
+    } else {
+      throw new Error(`SECURE Jito bundle failed: ${secureResult.error}`);
+    }
+  }
+
+  // SECURE: Build all instructions for a single protected transaction
+  private async buildSecureTokenInstructions(
+    creator: Keypair,
+    mint: Keypair,
+    createTokenMetadata: CreateTokenMetadata,
+    metadataUri: string,
+    creatorBuyAmountSol: bigint,
+    additionalBuys: BundledBuy[],
+    globalAccount: any,
+    slippageBasisPoints: bigint,
+    priorityFees?: PriorityFee
+  ): Promise<TransactionInstruction[]> {
+    
+    const instructions: TransactionInstruction[] = [];
+    
+    // 1. SECURE: Add priority fees first
+    if (priorityFees) {
+      instructions.push(
+        ComputeBudgetProgram.setComputeUnitLimit({ units: priorityFees.unitLimit }),
+        ComputeBudgetProgram.setComputeUnitPrice({ microLamports: priorityFees.unitPrice })
+      );
+    }
+    
+    // 2. Add CREATE instruction
+    const createIx = await this.getCreateInstructionOnly(
+      creator.publicKey,
+      createTokenMetadata.name,
+      createTokenMetadata.symbol,
+      metadataUri,
+      mint
+    );
+    instructions.push(createIx);
+
+    // 3. SECURE: Add creator buy with ATA creation
+    if (creatorBuyAmountSol > 0) {
+      const creatorATA = await getAssociatedTokenAddress(
+        mint.publicKey,
+        creator.publicKey,
+        false
+      );
+      
+      instructions.push(
+        createAssociatedTokenAccountInstruction(
+          creator.publicKey,
+          creatorATA,
+          creator.publicKey,
+          mint.publicKey
+        )
+      );
+
+      const buyAmount = globalAccount.getInitialBuyPrice(creatorBuyAmountSol);
+      const buyAmountWithSlippage = calculateWithSlippageBuy(
+        creatorBuyAmountSol,
+        slippageBasisPoints
+      );
+
+      const creatorBuyIx = await this.getBuyInstructionOnly(
+        creator.publicKey,
+        mint.publicKey,
+        globalAccount.feeRecipient,
+        buyAmount,
+        buyAmountWithSlippage
+      );
+      instructions.push(creatorBuyIx);
+    }
+
+    // 4. SECURE: Add all additional buys (with ATA creation)
+    for (let i = 0; i < additionalBuys.length; i++) {
+      const buyData = additionalBuys[i];
+      
+      // Create ATA for buyer
+      const buyerATA = await getAssociatedTokenAddress(
+        mint.publicKey,
+        buyData.wallet.publicKey,
+        false
+      );
+      
+      instructions.push(
+        createAssociatedTokenAccountInstruction(
+          buyData.wallet.publicKey,
+          buyerATA,
+          buyData.wallet.publicKey,
+          mint.publicKey
+        )
+      );
+
+      // Add buy instruction
+      const buyAmount = globalAccount.getInitialBuyPrice(buyData.solAmount);
+      const buyAmountWithSlippage = calculateWithSlippageBuy(
+        buyData.solAmount,
+        slippageBasisPoints
+      );
+
+      const buyIx = await this.getBuyInstructionOnly(
+        buyData.wallet.publicKey,
+        mint.publicKey,
+        globalAccount.feeRecipient,
+        buyAmount,
+        buyAmountWithSlippage
+      );
+      instructions.push(buyIx);
+    }
+    
+    console.log(`🛡️  SECURE transaction structure:`);
+    console.log(`   Priority fees: ${priorityFees ? 'YES' : 'NO'}`);
+    console.log(`   CREATE instruction: 1`);
+    console.log(`   Creator ATA + BUY: ${creatorBuyAmountSol > 0 ? 2 : 0}`);
+    console.log(`   Additional buys: ${additionalBuys.length * 2} (ATA + BUY each)`);
+    console.log(`   Total instructions: ${instructions.length}`);
+    console.log(`   🛡️  Tip will be embedded by secure bundler`);
+    
+    return instructions;
+  }
+
+  // ===========================================
+  // EXISTING METHODS (keeping them unchanged)
+  // ===========================================
+
   async createAndBuy(
     creator: Keypair,
     mint: Keypair,
@@ -126,231 +334,6 @@ export class PumpFunSDK {
     return createResults;
   }
 
-  // FIXED: Bundled create and buy method using Jito bundles with proper dual wallet support
-  async createAndBuyBundled(
-    creator: Keypair,
-    mint: Keypair,
-    createTokenMetadata: CreateTokenMetadata,
-    creatorBuyAmountSol: bigint,
-    additionalBuys: BundledBuy[],
-    slippageBasisPoints: bigint = 500n,
-    priorityFees?: PriorityFee,
-    commitment: Commitment = DEFAULT_COMMITMENT,
-    finality: Finality = DEFAULT_FINALITY
-  ): Promise<TransactionResult> {
-    
-    console.log(`🚀 Creating Jito bundled transactions with ${additionalBuys.length} additional buys`);
-    
-    // Upload metadata
-    let tokenMetadata = await this.createTokenMetadata(createTokenMetadata);
-
-    // Get global account for fee recipient
-    const globalAccount = await this.getGlobalAccount(commitment);
-
-    // Array to hold all transactions for Jito bundle
-    const bundleTransactions: Transaction[] = [];
-    
-    // 1. CREATE + Creator BUY transaction
-    let createAndCreatorBuyTx = new Transaction();
-    
-    // Add CREATE instruction
-    let createIx = await this.getCreateInstructionOnly(
-      creator.publicKey,
-      createTokenMetadata.name,
-      createTokenMetadata.symbol,
-      tokenMetadata.metadataUri,
-      mint
-    );
-    createAndCreatorBuyTx.add(createIx);
-
-    // Add creator's buy (if any)
-    if (creatorBuyAmountSol > 0) {
-      // CRITICAL FIX: Create ATA for creator BEFORE the buy instruction
-      const creatorATA = await getAssociatedTokenAddress(
-        mint.publicKey,
-        creator.publicKey,
-        false
-      );
-      
-      const createCreatorATAIx = createAssociatedTokenAccountInstruction(
-        creator.publicKey, // payer
-        creatorATA,        // ata address  
-        creator.publicKey, // owner
-        mint.publicKey     // mint
-      );
-      createAndCreatorBuyTx.add(createCreatorATAIx);
-
-      // Now add the buy instruction (ATA exists!)
-      const buyAmount = globalAccount.getInitialBuyPrice(creatorBuyAmountSol);
-      const buyAmountWithSlippage = calculateWithSlippageBuy(
-        creatorBuyAmountSol,
-        slippageBasisPoints
-      );
-
-      const creatorBuyIx = await this.getBuyInstructionOnly(
-        creator.publicKey,
-        mint.publicKey,
-        globalAccount.feeRecipient,
-        buyAmount,
-        buyAmountWithSlippage
-      );
-      createAndCreatorBuyTx.add(creatorBuyIx);
-    }
-
-    bundleTransactions.push(createAndCreatorBuyTx);
-    console.log(`✅ Added CREATE + Creator ATA + Creator BUY transaction`);
-
-    // 2. Individual transactions for each additional wallet
-    for (let i = 0; i < additionalBuys.length; i++) {
-      const buyData = additionalBuys[i];
-      const walletTx = new Transaction();
-      
-      // Create ATA for buyer
-      const associatedUser = await getAssociatedTokenAddress(
-        mint.publicKey,
-        buyData.wallet.publicKey,
-        false
-      );
-      
-      const createATAIx = createAssociatedTokenAccountInstruction(
-        buyData.wallet.publicKey,
-        associatedUser,
-        buyData.wallet.publicKey,
-        mint.publicKey
-      );
-      walletTx.add(createATAIx);
-
-      // Add buy instruction
-      const buyAmount = globalAccount.getInitialBuyPrice(buyData.solAmount);
-      const buyAmountWithSlippage = calculateWithSlippageBuy(
-        buyData.solAmount,
-        slippageBasisPoints
-      );
-
-      const buyIx = await this.getBuyInstructionOnly(
-        buyData.wallet.publicKey,
-        mint.publicKey,
-        globalAccount.feeRecipient,
-        buyAmount,
-        buyAmountWithSlippage
-      );
-      walletTx.add(buyIx);
-      
-      bundleTransactions.push(walletTx);
-      console.log(`✅ Added wallet ${i + 1} transaction: ${buyData.wallet.publicKey.toBase58().slice(0, 8)}... - ${Number(buyData.solAmount) / 1e9} SOL`);
-    }
-
-    console.log(`📦 Jito bundle prepared: ${bundleTransactions.length} transactions`);
-
-    // 3. Convert to VersionedTransactions and add signers
-    const versionedTransactions: VersionedTransaction[] = [];
-    
-    // First transaction: CREATE + Creator BUY (signed by creator and mint)
-    const createTxVersioned = await this.buildVersionedTransaction(
-      bundleTransactions[0],
-      creator.publicKey,
-      [creator, mint]
-    );
-    versionedTransactions.push(createTxVersioned);
-
-    // Additional transactions: each signed by respective wallet
-    for (let i = 1; i < bundleTransactions.length; i++) {
-      const walletTx = bundleTransactions[i];
-      const wallet = additionalBuys[i - 1].wallet;
-      
-      const walletTxVersioned = await this.buildVersionedTransaction(
-        walletTx,
-        wallet.publicKey,
-        [wallet]
-      );
-      versionedTransactions.push(walletTxVersioned);
-    }
-
-    console.log(`🎯 Built ${versionedTransactions.length} versioned transactions for Jito bundle`);
-
-    // 4. FIXED: Import and use the ENHANCED Jito bundling system with proper config
-    const { sendSmartJitoBundle } = await import('./jito');
-    
-    // FIXED: Create proper config object for Jito with dual wallet support
-    const jitoConfig: BundlerConfig = {
-      rpcUrl: this.connection.rpcEndpoint,
-      network: 'mainnet-beta',
-      // FIXED: Dual wallet setup
-      creatorWallet: creator,
-      distributorWallet: creator, // In bundled context, use creator as fallback
-      mainWallet: creator, // Backward compatibility
-      walletCount: additionalBuys.length,
-      swapAmountSol: Number(creatorBuyAmountSol) / 1e9,
-      randomizeBuyAmounts: false,
-      walletDelayMs: 100,
-      priorityFee: {
-        unitLimit: priorityFees?.unitLimit || 5000000,
-        unitPrice: priorityFees?.unitPrice || 200000,
-      },
-      jitoTipLamports: 1000000,
-      jitoMaxRetries: 3,
-      jitoTimeoutSeconds: 30,
-      forceJitoOnly: false,
-      slippageBasisPoints: Number(slippageBasisPoints),
-      maxSolPerWallet: 0.01,
-      minMainWalletBalance: 0.1,
-      maxTotalSolSpend: 0.1,
-      maxRetryAttempts: 3,
-      retryCooldownSeconds: 5,
-      debugMode: false,
-      logLevel: 'info',
-      saveLogsToFile: true,
-      autoCleanupWallets: false,
-      requireConfirmation: false,
-      monitorBalances: false,
-      balanceCheckInterval: 10,
-    };
-
-    // 5. Send via Jito bundle with enhanced debugging and verification
-    console.log(`🚀 Sending Jito bundle with enhanced debugging and verification...`);
-    const jitoResult = await sendSmartJitoBundle(
-      versionedTransactions,
-      creator, // FIXED: Payer is the creator wallet
-      jitoConfig,
-      mint.publicKey.toBase58() // Pass expected mint for verification
-    );
-
-    if (jitoResult.success) {
-      console.log(`🎉 Jito bundle successful!`);
-      console.log(`   Signature: ${jitoResult.signature}`);
-      console.log(`   Bundle ID: ${jitoResult.bundleId}`);
-      console.log(`   Attempts: ${jitoResult.attempts}`);
-      
-      return {
-        success: true,
-        signature: jitoResult.signature,
-        // You can access the mint here since it's the same mint keypair
-      };
-    } else {
-      throw new Error(`Jito bundle failed: ${jitoResult.error}`);
-    }
-  }
-
-  // Helper method to build versioned transactions
-  private async buildVersionedTransaction(
-    transaction: Transaction,
-    payer: PublicKey,
-    signers: Keypair[]
-  ): Promise<VersionedTransaction> {
-    const { buildVersionedTx } = await import('./sdk/util');
-    
-    const versionedTx = await buildVersionedTx(
-      this.connection,
-      payer,
-      transaction,
-      'confirmed'
-    );
-    
-    versionedTx.sign(signers);
-    return versionedTx;
-  }
-
-  // Your existing buy method (unchanged)
   async buy(
     buyer: Keypair,
     mint: PublicKey,
@@ -380,7 +363,6 @@ export class PumpFunSDK {
     return buyResults;
   }
 
-  // Your existing sell method (unchanged)
   async sell(
     seller: Keypair,
     mint: PublicKey,
@@ -410,7 +392,6 @@ export class PumpFunSDK {
     return sellResults;
   }
 
-  // Your existing method (unchanged)
   async getCreateInstructions(
     creator: PublicKey,
     name: string,
@@ -477,7 +458,6 @@ export class PumpFunSDK {
       .transaction();
   }
 
-  // NEW: Get create instruction only (for bundling)
   async getCreateInstructionOnly(
     creator: PublicKey,
     name: string,
@@ -540,10 +520,9 @@ export class PumpFunSDK {
         eventAuthority: eventAuthorityPDA,
         program: this.program.programId,
       })
-      .instruction(); // Return instruction, not transaction
+      .instruction();
   }
 
-  // Your existing method (unchanged)
   async getBuyInstructionsBySolAmount(
     buyer: PublicKey,
     mint: PublicKey,
@@ -576,7 +555,6 @@ export class PumpFunSDK {
     );
   }
 
-  // Your existing method (unchanged)
   async getBuyInstructions(
     buyer: PublicKey,
     mint: PublicKey,
@@ -608,13 +586,11 @@ export class PumpFunSDK {
   
     const associatedUser = await getAssociatedTokenAddress(mint, buyer, false);
 
-    // Get bonding curve account to find creator
     const bondingCurveAccount = await this.connection.getAccountInfo(bondingCurvePDA);
     if (!bondingCurveAccount) {
       throw new Error('Bonding curve account not found');
     }
     
-    // Parse bonding curve to get creator (at offset 93 according to IDL)
     const creatorBytes = bondingCurveAccount.data.slice(93, 93 + 32);
     const creator = new PublicKey(creatorBytes);
     
@@ -661,7 +637,6 @@ export class PumpFunSDK {
     return transaction;
   }
 
-  // NEW: Get buy instruction only (for bundling)
   async getBuyInstructionOnly(
     buyer: PublicKey,
     mint: PublicKey,
@@ -692,7 +667,6 @@ export class PumpFunSDK {
   
     const associatedUser = await getAssociatedTokenAddress(mint, buyer, false);
 
-    // FIXED: For bundled transactions, we use the creator from the provider
     const creator = this.program.provider.publicKey!;
     const [creatorVaultPDA] = PublicKey.findProgramAddressSync(
       [Buffer.from("creator-vault"), creator.toBuffer()],
@@ -715,10 +689,9 @@ export class PumpFunSDK {
         eventAuthority: eventAuthorityPDA,
         program: this.program.programId,
       })
-      .instruction(); // Return instruction, not transaction
+      .instruction();
   }
 
-  // Your existing sell methods (unchanged)
   async getSellInstructionsByTokenAmount(
     seller: PublicKey,
     mint: PublicKey,
@@ -784,13 +757,11 @@ export class PumpFunSDK {
 
     const associatedUser = await getAssociatedTokenAddress(mint, seller, false);
 
-    // Get bonding curve account to find creator
     const bondingCurveAccount = await this.connection.getAccountInfo(bondingCurvePDA);
     if (!bondingCurveAccount) {
       throw new Error('Bonding curve account not found');
     }
     
-    // Parse bonding curve to get creator (at offset 93 according to IDL)
     const creatorBytes = bondingCurveAccount.data.slice(93, 93 + 32);
     const creator = new PublicKey(creatorBytes);
     
@@ -818,7 +789,6 @@ export class PumpFunSDK {
       .transaction();
   }
 
-  // Your existing methods (unchanged)
   async getBondingCurveAccount(
     mint: PublicKey,
     commitment: Commitment = DEFAULT_COMMITMENT
@@ -854,7 +824,6 @@ export class PumpFunSDK {
     )[0];
   }
 
-  // Your existing method (unchanged)
   async createTokenMetadata(create: CreateTokenMetadata) {
     if (!(create.file instanceof Blob)) {
         throw new Error('File must be a Blob or File object');
@@ -905,7 +874,6 @@ export class PumpFunSDK {
     }
   }
 
-  // Your existing event methods (unchanged)
   addEventListener<T extends PumpFunEventType>(
     eventType: T,
     callback: (
