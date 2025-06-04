@@ -1,4 +1,4 @@
-// src/bundler.ts - MODIFIED: Added token distribution functionality
+// src/bundler.ts - MODIFIED: Manual creator buy amount
 
 import {
   Connection,
@@ -26,6 +26,12 @@ import { BundledBuy } from './pumpfun';
 // Import the WORKING PumpFun SDK
 import { PumpFunSDK, DEFAULT_DECIMALS } from './sdk/index';
 import { CreateTokenMetadata, PriorityFee } from './sdk/types';
+
+// =============================
+// 🎯 MANUAL CREATOR BUY AMOUNT
+// =============================
+// Change this value to set how much SOL the creator wallet spends on the initial buy
+const CREATOR_BUY_AMOUNT_SOL = 0.05; // 👈 CHANGE THIS VALUE (in SOL)
 
 export interface TokenMetadata {
   name: string;
@@ -91,6 +97,9 @@ export class SecurePumpBundler {
     logger.info(`🎨 Creator wallet: ${config.creatorWallet.publicKey.toBase58()}`);
     logger.info(`💰 Distributor wallet: ${config.distributorWallet.publicKey.toBase58()}`);
     
+    // LOG THE MANUAL CREATOR BUY AMOUNT
+    logger.info(`🎯 Creator manual buy amount: ${CREATOR_BUY_AMOUNT_SOL} SOL`);
+    
     this.generateWallets();
   }
 
@@ -121,14 +130,14 @@ export class SecurePumpBundler {
     const distributorBalanceSOL = distributorBalance / LAMPORTS_PER_SOL;
     logger.info(`   💰 Distributor wallet: ${distributorBalanceSOL.toFixed(6)} SOL`);
     
-    // FIXED: Calculate for 4 initial wallets + distribution needs
+    // FIXED: Use manual creator buy amount for calculations
     const buyAmount = this.config.swapAmountSol;
     const retainAmount = parseFloat(process.env.RETAIN_SOL_PER_WALLET || '0.005');
     const txFees = 0.002;
     const solPerWallet = buyAmount + retainAmount + txFees;
     
     const totalDistributorNeeded = (4 * solPerWallet) + 0.01; // 4 wallets + buffer
-    const creatorNeeded = buyAmount + 0.05; // For token creation and initial buy
+    const creatorNeeded = CREATOR_BUY_AMOUNT_SOL + 0.05; // MANUAL AMOUNT + creation fees
     
     // ADDITIONAL: Calculate distribution SOL needs
     const finalWalletCount = parseInt(process.env.FINAL_WALLET_COUNT || '8');
@@ -137,7 +146,7 @@ export class SecurePumpBundler {
     const distributionSolNeeded = additionalWallets * solPerDistributedWallet;
     
     logger.info(`💰 Balance requirements:`);
-    logger.info(`   🎨 Creator needs: ${creatorNeeded.toFixed(6)} SOL (creation + initial buy)`);
+    logger.info(`   🎨 Creator needs: ${creatorNeeded.toFixed(6)} SOL (creation + ${CREATOR_BUY_AMOUNT_SOL} SOL manual buy)`);
     logger.info(`   💰 Distributor needs: ${totalDistributorNeeded.toFixed(6)} SOL (4 initial wallets)`);
     logger.info(`   📦 Distribution needs: ${distributionSolNeeded.toFixed(6)} SOL (${additionalWallets} new wallets)`);
     logger.info(`   🎯 Total estimated: ${(creatorNeeded + totalDistributorNeeded + distributionSolNeeded).toFixed(6)} SOL`);
@@ -374,7 +383,7 @@ export class SecurePumpBundler {
     return amounts;
   }
 
-  // MODIFIED: Main function with distribution support
+  // MODIFIED: Main function with manual creator buy amount
   async createAndBundle(metadata: TokenMetadata, testMode: boolean = false, enableDistribution: boolean = true): Promise<BundleResult> {
     if (testMode) {
       logger.info('🧪 TEST MODE - Validating working SDK...');
@@ -435,6 +444,9 @@ export class SecurePumpBundler {
       const buyAmountSol = BigInt(Math.floor(this.config.swapAmountSol * LAMPORTS_PER_SOL));
       const slippageBasisPoints = BigInt(this.config.slippageBasisPoints);
       
+      // MODIFIED: Use manual creator buy amount
+      const creatorBuyAmountSol = BigInt(Math.floor(CREATOR_BUY_AMOUNT_SOL * LAMPORTS_PER_SOL));
+      
       // Create bundled buys for 4 wallets
       const bundledBuys: BundledBuy[] = this.wallets.map((wallet, index) => {
         // Add randomization to buy amounts (±20%)
@@ -450,7 +462,7 @@ export class SecurePumpBundler {
       });
       
       logger.info('🔨 Creating ATOMIC bundled transaction (CREATE + 4 buys)...');
-      logger.info(`   🎨 Creator wallet handles: Token creation + initial buy`);
+      logger.info(`   🎨 Creator wallet handles: Token creation + ${CREATOR_BUY_AMOUNT_SOL} SOL initial buy`);
       logger.info(`   💰 Distributor wallet funded: ${bundledBuys.length} bundled buy wallets`);
       
       const priorityFees: PriorityFee = {
@@ -458,12 +470,12 @@ export class SecurePumpBundler {
         unitPrice: this.config.priorityFee.unitPrice,
       };
       
-      // Step 6: Execute bundled create and buy WITH ATOMIC BUNDLE (5 transactions total)
+      // Step 6: Execute bundled create and buy WITH MANUAL CREATOR AMOUNT
       const createResult = await this.pumpFunSDK.createAndBuyBundled(
         this.config.creatorWallet,    // CREATOR: Creates token and does initial buy
         mint,                         // mint keypair
         createTokenMetadata,          // metadata
-        buyAmountSol,                // creator's initial buy amount
+        creatorBuyAmountSol,         // 🎯 MANUAL CREATOR BUY AMOUNT
         bundledBuys,                 // bundled buys (4 wallets)
         slippageBasisPoints,         // slippage
         priorityFees,                // priority fees
@@ -478,6 +490,7 @@ export class SecurePumpBundler {
       logger.info(`✅ ATOMIC bundled transaction successful!`);
       logger.info(`   Signature: ${createResult.signature}`);
       logger.info(`   Mint: ${mint.publicKey.toBase58()}`);
+      logger.info(`   Creator bought: ${CREATOR_BUY_AMOUNT_SOL} SOL worth`);
       logger.info(`   View on Pump.fun: https://pump.fun/${mint.publicKey.toBase58()}`);
       
       // Step 7: Get initial wallet info with cleanup
@@ -539,7 +552,7 @@ export class SecurePumpBundler {
       this.saveAllFinalWallets(allFinalWallets, mint.publicKey.toBase58());
       
       logger.info(`🎉 Operation completed with ATOMIC bundling + distribution!`);
-      logger.info(`   🎨 Creator wallet: Token created + initial buy ✅`);
+      logger.info(`   🎨 Creator wallet: Token created + ${CREATOR_BUY_AMOUNT_SOL} SOL initial buy ✅`);
       logger.info(`   💰 Distributor wallet: Funded 4 atomic bundled buys ✅`);
       logger.info(`   📦 Atomic bundle: 4 wallets ✅`);
       if (enableDistribution && distributionResults) {

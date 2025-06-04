@@ -77,18 +77,6 @@ export function validateEnvironment(): void {
     throw new Error('WALLET_COUNT must be between 1 and 20');
   }
   
-  // Validate swap amount
-  const swapAmount = parseFloat(process.env.SWAP_AMOUNT_SOL || '0.001');
-  if (swapAmount <= 0 || swapAmount > 1) {
-    throw new Error('SWAP_AMOUNT_SOL must be between 0 and 1');
-  }
-  
-  // Validate max spending limit
-  const maxSolPerWallet = parseFloat(process.env.MAX_SOL_PER_WALLET || '0.01');
-  if (swapAmount > maxSolPerWallet) {
-    throw new Error('SWAP_AMOUNT_SOL cannot exceed MAX_SOL_PER_WALLET');
-  }
-  
   logger.info('✅ Environment validation passed');
 }
 
